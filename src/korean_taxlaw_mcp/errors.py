@@ -14,6 +14,8 @@ from typing import Any
 class ErrorCode(StrEnum):
     #: 조회 조건에 정확히 일치하는 자료가 원본에 없다. 부존재 주장.
     NOT_FOUND = "NOT_FOUND"
+    #: 같은 문서번호를 가진 자료가 여러 건이라 하나를 확정할 수 없다.
+    AMBIGUOUS_DOCUMENT_NUMBER = "AMBIGUOUS_DOCUMENT_NUMBER"
     #: 문서는 찾았으나 본문을 원본이 제공하지 않는다. 부존재 주장 아님.
     DETAIL_NOT_AVAILABLE = "DETAIL_NOT_AVAILABLE"
     #: 국세법령정보시스템이 오류·점검·비정상 응답을 반환. 부존재 주장 아님.
@@ -33,6 +35,10 @@ GUARDRAIL: dict[ErrorCode, str] = {
     ErrorCode.NOT_FOUND: (
         "원본에 일치하는 자료가 없습니다. 문서 내용을 추측하거나 생성하지 마세요. "
         "비슷한 문서를 정답으로 제시하지 말고, 사용자에게 '조회 실패'를 그대로 보고하세요."
+    ),
+    ErrorCode.AMBIGUOUS_DOCUMENT_NUMBER: (
+        "동일한 문서번호를 가진 자료가 여러 건입니다. 임의로 하나를 정답으로 선택하지 말고 "
+        "문서 주제나 검색 결과의 ntstDcmId로 대상을 구분하세요."
     ),
     ErrorCode.DETAIL_NOT_AVAILABLE: (
         "문서는 존재하지만 본문을 가져오지 못했습니다. 본문을 추측·생성하지 마세요. "

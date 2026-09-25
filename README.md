@@ -85,6 +85,7 @@ MCP가 연결된 대화 창에서 일반 문장으로 요청하면 됩니다.
 - [설치 가이드](docs/INSTALLATION.md) — 운영체제·클라이언트별 설치와 문제 해결
 - [개발 가이드](docs/DEVELOPMENT.md) — 개발 환경과 테스트
 - [지원 범위 조사](docs/INVESTIGATION.md) — 원본 시스템 분석과 지원·미지원 데이터
+- [포크 유지관리](docs/FORK_MAINTENANCE.md) — upstream 동기화 후보와 승인 절차
 
 ## 알아두기
 

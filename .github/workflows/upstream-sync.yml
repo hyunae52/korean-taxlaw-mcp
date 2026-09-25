@@ -1,0 +1,131 @@
+name: Upstream sync candidate
+
+on:
+  schedule:
+    - cron: "10 19 * * *" # 04:10 KST
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-sync-candidate
+  cancel-in-progress: false
+
+env:
+  CANDIDATE_BRANCH: automation/upstream-zisu17-main
+  UPSTREAM_REPOSITORY: zisu17/korean-taxlaw-mcp
+
+jobs:
+  prepare:
+    name: Prepare candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.candidate.outputs.changed }}
+      head_sha: ${{ steps.candidate.outputs.head_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - id: candidate
+        name: Merge upstream into an isolated candidate branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream main
+          git fetch --no-tags origin main
+
+          if git ls-remote --exit-code --heads origin "$CANDIDATE_BRANCH" >/dev/null 2>&1; then
+            git fetch --no-tags origin \
+              "refs/heads/${CANDIDATE_BRANCH}:refs/remotes/origin/${CANDIDATE_BRANCH}"
+          fi
+
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --force-create "$CANDIDATE_BRANCH" origin/main
+          git merge --no-edit --no-ff upstream/main
+          head_sha=$(git rev-parse HEAD)
+          git push --force-with-lease origin "HEAD:refs/heads/${CANDIDATE_BRANCH}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Validate / Python ${{ matrix.python-version }}
+    if: needs.prepare.outputs.changed == 'true'
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.head_sha }}
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+      - name: Verify committed fixtures
+        run: |
+          test -f tests/fixtures/codes.json.gz
+          test -f tests/fixtures/olta_search_interpretation.html.gz
+      - name: Run offline tests without skips
+        shell: bash
+        run: |
+          set -eo pipefail
+          uv run python -W error::SyntaxWarning -m pytest -q -ra --strict-markers \
+            --ignore=tests/test_live.py | tee /tmp/pytest.out
+          if grep -qE "[0-9]+ skipped" /tmp/pytest.out; then
+            echo "::error::Offline tests contain skipped cases."
+            exit 1
+          fi
+
+  open-pr:
+    name: Open reviewed candidate PR
+    if: needs.prepare.outputs.changed == 'true'
+    needs: [prepare, validate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Create or refresh the candidate pull request
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          Automated candidate from \`${UPSTREAM_REPOSITORY}:main\`.
+
+          Candidate commit: \`${{ needs.prepare.outputs.head_sha }}\`
+          Validation run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          The workflow merged upstream without executing it in the write-enabled job. Offline tests ran separately with read-only permissions on Python 3.11 and 3.13. Production activation still requires human review and an explicit Legal Harness release change.
+          EOF
+          )
+          number=$(gh pr list --state open --head "$CANDIDATE_BRANCH" --base main --json number --jq '.[0].number // empty')
+          if [[ -n "$number" ]]; then
+            gh pr edit "$number" --title "chore: sync zisu17 upstream" --body "$body"
+          else
+            gh pr create --base main --head "$CANDIDATE_BRANCH" \
+              --title "chore: sync zisu17 upstream" --body "$body"
+          fi

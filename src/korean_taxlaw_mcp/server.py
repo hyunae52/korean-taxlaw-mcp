@@ -185,6 +185,8 @@ def _merge_law(query: str | None, law: str | None, article: str | None) -> str |
     description=(
         "문서번호로 국세청 문서(해석례·판례·결정례 자동 판별)를 **정확히 일치할 때만** "
         "본문까지 반환한다. 표기 편차('서면 2026 법규재산 0119' 등)는 자동 정규화한다. "
+        "동일 번호가 여러 건이면 context_query로 주제를 구분하며, 확정할 수 없으면 "
+        "AMBIGUOUS_DOCUMENT_NUMBER를 반환한다. "
         "없으면 NOT_FOUND — similarDocuments 는 번호가 일부 겹치는 별개 문서이며 정답이 아니다. "
         "문서번호를 아는 경우 검색 대신 항상 이 도구를 먼저 쓸 것."
     ),
@@ -194,6 +196,10 @@ async def lookup_tax_document(
     document_number: Annotated[
         str, Field(min_length=2, description="문서번호. 표기 편차 자동 정규화.")
     ],
+    context_query: Annotated[
+        str | None,
+        Field(description="중복 문서번호를 구분할 주제 키워드. 중복일 때만 사용."),
+    ] = None,
     include_full_text: Annotated[bool, Field(description="본문 포함 여부")] = True,
     body_limit: Annotated[
         int | None, Field(ge=500, le=200_000, description="본문 최대 글자수(기본 30000)")
@@ -204,12 +210,33 @@ async def lookup_tax_document(
     ] = "full",
 ) -> str:
     outcome = await lookup_by_document_number(
-        document_number, include_full_text=include_full_text, body_limit=body_limit
+        document_number,
+        context_query=context_query,
+        include_full_text=include_full_text,
+        body_limit=body_limit,
     )
     if outcome["found"]:
         if detail == "compact":
             outcome = {**outcome, "document": _compact_document(outcome["document"])}
         return _ok(outcome)
+
+    if outcome.get("ambiguous"):
+        raise NtsError(
+            ErrorCode.AMBIGUOUS_DOCUMENT_NUMBER,
+            f"문서번호 '{document_number}' 와 정확히 일치하는 문서가 여러 건입니다.",
+            hints=[
+                "context_query에 문서 주제의 핵심어를 넣어 다시 조회하세요.",
+                "후보의 ntstDcmId를 get_tax_document에 주면 문서를 직접 지정할 수 있습니다.",
+            ],
+            detail={
+                "normalizedDocumentNumber": outcome["normalizedDocumentNumber"],
+                "exactMatch": False,
+                "candidateCount": outcome["candidateCount"],
+                "candidates": outcome["candidates"],
+                "triedQueries": outcome["triedQueries"],
+                "searchedDomains": outcome["searchedDomains"],
+            },
+        )
 
     raise NtsError(
         ErrorCode.NOT_FOUND,
@@ -270,7 +297,7 @@ async def search_tax_interpretations(
 ) -> str:
     # 문서번호가 주어지면 키워드 검색이 아니라 exact lookup 이 먼저다.
     if document_number and document_number.strip():
-        return await lookup_tax_document(document_number=document_number)
+        return await lookup_tax_document(document_number=document_number, context_query=query)
 
     codes, unresolved = _resolve_tax_types(tax_type)
     merged = _merge_law(query, law, article)
@@ -337,7 +364,7 @@ async def search_tax_decisions(
     limit: Annotated[int, Field(ge=1, le=100, description="페이지 크기. 명시 요청 없이는 늘리지 말 것.")] = DEFAULT_SEARCH_LIMIT,
 ) -> str:
     if case_number and case_number.strip():
-        return await lookup_tax_document(document_number=case_number)
+        return await lookup_tax_document(document_number=case_number, context_query=query)
 
     codes, unresolved = _resolve_tax_types(tax_type)
     result_codes, unresolved_results = _resolve_decision_results(result)
@@ -580,7 +607,9 @@ async def search_taxlaw(
     # 목적이므로 본문 상세 조회는 생략한다(필요하면 get_tax_document 로 이어서 조회).
     if hint.document_number or looks_like_document_number(query):
         outcome = await lookup_by_document_number(
-            hint.document_number or query.strip(), metadata_only=True
+            hint.document_number or query.strip(),
+            context_query=hint.content_query,
+            metadata_only=True,
         )
         if outcome["found"]:
             return _ok({

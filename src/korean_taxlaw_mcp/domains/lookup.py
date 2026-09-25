@@ -43,6 +43,7 @@ _SIMILAR_KEYS = ("documentType", "documentNumber", "title", "registrationDate", 
 async def lookup_by_document_number(
     raw: str,
     *,
+    context_query: str | None = None,
     include_full_text: bool = True,
     body_limit: int | None = None,
     similar_limit: int = DEFAULT_SIMILAR_LIMIT,
@@ -60,11 +61,13 @@ async def lookup_by_document_number(
     parsed = parse_doc_number(raw)
     candidates = lookup_candidates(raw)
     similar: dict[str, dict[str, Any]] = {}
+    exact: dict[str, tuple[str, dict[str, Any]]] = {}
     tried: list[str] = []
     searched: list[str] = []
 
     for domain in _domain_order(raw):
         searched.append(domain)
+        domain_has_exact = False
         for candidate in candidates:
             tried.append(f"{domain}:{candidate}")
             # 후보 하나라도 조회에 실패하면 부존재를 확정할 수 없다. 장애를 삼키고
@@ -84,27 +87,86 @@ async def lookup_by_document_number(
                 if not item.get("ntstDcmId"):
                     continue
                 if is_same_doc_number(number, parsed.canonical) or is_same_doc_number(number, raw):
-                    if metadata_only:
-                        # 검색 요약에는 URL 이 없으므로(응답 최상위 템플릿으로 대체됨)
-                        # 단건 반환에는 sourceUrl 을 붙여 준다.
-                        kind = "question" if domain == "interpretation" else "precedent"
-                        document = {**item, "sourceUrl": detail_url(item["ntstDcmId"], kind)}
-                    else:
-                        document = await get_document(
-                            item["ntstDcmId"],
-                            include_full_text=include_full_text,
-                            body_limit=body_limit,
-                        )
-                    # 성공 응답에는 진단 메타데이터(triedQueries 등)를 싣지 않는다 —
-                    # 그것들은 '왜 못 찾았는가'를 설명하는 값이라 NOT_FOUND 전용이다.
-                    return {
-                        "found": True,
-                        "exactMatch": True,
-                        "domain": domain,
-                        "document": document,
-                    }
+                    exact.setdefault(item["ntstDcmId"], (domain, item))
+                    domain_has_exact = True
+                    continue
                 if number:
                     similar.setdefault(item["ntstDcmId"], item)
+
+            # 한 검색 응답에 같은 번호의 모든 문서가 함께 온다. 표기 변형을 더
+            # 조회하면 같은 후보만 반복되므로 이 영역의 후보 검색을 끝낸다.
+            if domain_has_exact:
+                break
+
+        # 문서번호 모양으로 먼저 고른 영역에서 exact 를 찾았으면 반대 영역까지
+        # 조회하지 않는다. 기존 라우팅 계약을 유지하면서 같은 영역의 중복만 잡는다.
+        if domain_has_exact:
+            break
+
+    selected_id: str | None = next(iter(exact)) if len(exact) == 1 else None
+    resolved_by_context = False
+
+    if len(exact) > 1 and context_query and context_query.strip():
+        narrowed: set[str] = set()
+        for domain in {domain for domain, _item in exact.values()}:
+            result = await search_documents(
+                doc_classes=_CLASSES[domain],
+                query=f"{parsed.canonical} {context_query.strip()}",
+                match="all",
+                limit=100,
+                sort="relevance",
+            )
+            for item in result["items"]:
+                doc_id = item.get("ntstDcmId")
+                if doc_id in exact and (
+                    is_same_doc_number(item.get("documentNumber", ""), parsed.canonical)
+                    or is_same_doc_number(item.get("documentNumber", ""), raw)
+                ):
+                    narrowed.add(doc_id)
+        if len(narrowed) == 1:
+            selected_id = next(iter(narrowed))
+            resolved_by_context = True
+
+    if selected_id:
+        domain, item = exact[selected_id]
+        if metadata_only:
+            # 검색 요약에는 URL 이 없으므로(응답 최상위 템플릿으로 대체됨)
+            # 단건 반환에는 sourceUrl 을 붙여 준다.
+            kind = "question" if domain == "interpretation" else "precedent"
+            document = {**item, "sourceUrl": detail_url(item["ntstDcmId"], kind)}
+        else:
+            document = await get_document(
+                item["ntstDcmId"],
+                include_full_text=include_full_text,
+                body_limit=body_limit,
+            )
+        out: dict[str, Any] = {
+            "found": True,
+            "exactMatch": True,
+            "domain": domain,
+            "document": document,
+        }
+        if resolved_by_context:
+            out["resolvedBy"] = "document_number_and_context"
+            out["candidateCount"] = len(exact)
+        return out
+
+    if exact:
+        exact_documents = [slim(item, _SIMILAR_KEYS) for _domain, item in exact.values()]
+        return {
+            "found": False,
+            "exactMatch": False,
+            "ambiguous": True,
+            "normalizedDocumentNumber": parsed.canonical,
+            "candidateCount": len(exact_documents),
+            "candidates": exact_documents,
+            "triedQueries": tried,
+            "searchedDomains": searched,
+            "note": (
+                "동일한 문서번호를 가진 자료가 여러 건입니다. 문서 주제나 ntstDcmId로 "
+                "대상을 구분하세요."
+            ),
+        }
 
     similar_documents = [slim(s, _SIMILAR_KEYS) for s in list(similar.values())[:similar_limit]]
     note = (

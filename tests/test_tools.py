@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 
 import httpx
@@ -14,6 +15,7 @@ import respx
 
 from korean_taxlaw_mcp.action_client import ACTION_URL, close_client
 from korean_taxlaw_mcp.cache import cache
+from korean_taxlaw_mcp.domains.lookup import lookup_by_document_number
 from korean_taxlaw_mcp.server import TOOL_NAMES, mcp
 
 from .conftest import load, requires_fixtures
@@ -32,6 +34,7 @@ class Upstream:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.search_by_query: dict[str, str] = {}
+        self.search_payload: dict[str, dict] = {}
         self.detail_by_id: dict[str, str] = {}
         #: fixture 를 손봐서 돌려주고 싶을 때(본문 제거 등) 쓰는 직접 주입 경로
         self.detail_payload: dict[str, dict] = {}
@@ -46,6 +49,8 @@ class Upstream:
         if action_id == "ASIPDI002PR01":
             include = param.get("icldVcbCtl") or []
             key = " ".join(include)
+            if key in self.search_payload:
+                return httpx.Response(200, json=_envelope(action_id, self.search_payload[key]))
             name = self.search_by_query.get(key, self.default_search)
             if name is None:
                 return httpx.Response(200, json=_envelope(action_id, {"top": [], "body": []}))
@@ -174,6 +179,82 @@ async def test_lookup_missing_document_is_not_found(upstream) -> None:
     label, data = await call("lookup_tax_document", {"document_number": "서면-2026-법규재산-9999"})
     assert label == "NOT_FOUND"
     assert data["error"]["detail"]["similarDocuments"] == []
+
+
+def _duplicate_document_number_payload() -> dict:
+    payload = deepcopy(load("search_docnumber_exact"))
+    first = payload["body"][0]["dcm"]
+    first.update({
+        "DOC_ID": "010000000000091224",
+        "NTST_DCM_DSCM_CNTN": "법인46012-1784",
+        "TTL": "가구 판매장려금 및 여행경비의 손비 해당 여부",
+        "GIST_CNTN": "판매장려금과 여행경비를 손비로 인정할 수 있는지에 관한 문서",
+        "NTST_DCM_RGT_DT": "19940621000000",
+        "DCM_RGT_DTM_S": "19940621",
+    })
+    second_row = deepcopy(payload["body"][0])
+    second_row["dcm"].update({
+        "DOC_ID": "010000000000062896",
+        "NTST_DCM_DSCM_CNTN": "법인46012-1784",
+        "TTL": "임원 퇴직금 중간정산 시 현실적인 퇴직 해당 여부",
+        "GIST_CNTN": "임원에게 지급한 퇴직금 중간정산에 관한 문서",
+        "NTST_DCM_RGT_DT": "19980702000000",
+        "DCM_RGT_DTM_S": "19980702",
+    })
+    payload["body"] = [payload["body"][0], second_row]
+    payload["top"][0]["categoryMap"]["SUB_ID_CATEGORY"][0]["count"] = "2"
+    return payload
+
+
+async def test_duplicate_document_number_is_not_returned_as_exact(upstream) -> None:
+    duplicate = _duplicate_document_number_payload()
+    upstream.search_payload["법인46012-1784"] = duplicate
+
+    label, data = await call("lookup_tax_document", {"document_number": "법인46012-1784"})
+
+    assert label == "AMBIGUOUS_DOCUMENT_NUMBER"
+    detail = data["error"]["detail"]
+    assert detail["exactMatch"] is False
+    assert detail["candidateCount"] == 2
+    assert {item["ntstDcmId"] for item in detail["candidates"]} == {
+        "010000000000091224",
+        "010000000000062896",
+    }
+
+
+async def test_context_resolves_one_duplicate_document_number(upstream) -> None:
+    duplicate = _duplicate_document_number_payload()
+    retirement_only = deepcopy(duplicate)
+    retirement_only["body"] = [duplicate["body"][1]]
+    retirement_only["top"][0]["categoryMap"]["SUB_ID_CATEGORY"][0]["count"] = "1"
+    upstream.search_payload["법인46012-1784"] = duplicate
+    upstream.search_payload["법인46012-1784 퇴직금"] = retirement_only
+
+    outcome = await lookup_by_document_number(
+        "법인46012-1784", context_query="퇴직금", metadata_only=True
+    )
+
+    assert outcome["found"] is True
+    assert outcome["exactMatch"] is True
+    assert outcome["resolvedBy"] == "document_number_and_context"
+    assert outcome["candidateCount"] == 2
+    assert outcome["document"]["ntstDcmId"] == "010000000000062896"
+
+
+async def test_irrelevant_context_keeps_duplicate_ambiguous(upstream) -> None:
+    upstream.search_payload["법인46012-1784"] = _duplicate_document_number_payload()
+    upstream.search_payload["법인46012-1784 정리채권"] = {
+        "top": [],
+        "body": [],
+    }
+
+    outcome = await lookup_by_document_number(
+        "법인46012-1784", context_query="정리채권", metadata_only=True
+    )
+
+    assert outcome["found"] is False
+    assert outcome["ambiguous"] is True
+    assert outcome["candidateCount"] == 2
 
 
 # ─── 검색 도구 ────────────────────────────────────────────────────────────────
