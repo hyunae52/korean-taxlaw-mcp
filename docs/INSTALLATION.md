@@ -18,7 +18,8 @@ korean-taxlaw-mcp를 이 컴퓨터에 로컬 MCP로 설치해줘.
 현재 사용 중인 Claude Desktop 앱의 로컬 STDIO MCP 서버로 등록하고,
 이름은 korean-taxlaw로 지정해줘.
 
-저장소: https://github.com/zisu17/korean-taxlaw-mcp
+저장소: https://github.com/hyunae52/korean-taxlaw-mcp
+설치 기준: taxlab-v2.0.0.post1
 
 uv가 없으면 먼저 설치해. 그런 다음 uv tool로 패키지를 설치하고 실행 파일의 절대경로를
 찾아 Claude Desktop 설정에 넣어줘. 기존 MCP 설정은 그대로 두고, 끝나면 앱 재시작 방법을
@@ -35,7 +36,8 @@ korean-taxlaw-mcp를 이 컴퓨터에 로컬 MCP로 설치해줘.
 현재 사용 중인 ChatGPT 데스크톱 앱의 Codex에서 쓸 로컬 STDIO MCP 서버로
 등록하고, 이름은 korean-taxlaw로 지정해줘.
 
-저장소: https://github.com/zisu17/korean-taxlaw-mcp
+저장소: https://github.com/hyunae52/korean-taxlaw-mcp
+설치 기준: taxlab-v2.0.0.post1
 
 uv가 없으면 먼저 설치해. 그런 다음 uv tool로 패키지를 설치하고 실행 파일의 절대경로를
 찾아 ChatGPT 데스크톱 앱의 Codex MCP 설정에 넣어줘. 기존 MCP 설정은 그대로 두고,
@@ -76,7 +78,7 @@ uv --version
 ### korean-taxlaw-mcp 설치
 
 ```bash
-uv tool install git+https://github.com/zisu17/korean-taxlaw-mcp.git
+uv tool install git+https://github.com/hyunae52/korean-taxlaw-mcp.git@taxlab-v2.0.0.post1
 ```
 
 동작 확인:
@@ -176,7 +178,7 @@ macOS:
 코드를 수정하거나 개발에 참여할 때 사용합니다.
 
 ```bash
-git clone https://github.com/zisu17/korean-taxlaw-mcp.git
+git clone --branch taxlab-v2.0.0.post1 https://github.com/hyunae52/korean-taxlaw-mcp.git
 cd korean-taxlaw-mcp
 uv sync
 uv run korean-taxlaw-mcp --help
@@ -198,7 +200,7 @@ MCP 서버 추가 화면에서 같은 값을 입력합니다.
 uv를 사용할 수 없는 경우 Python 3.11 이상을 직접 설치한 뒤 사용합니다.
 
 ```bash
-git clone https://github.com/zisu17/korean-taxlaw-mcp.git
+git clone --branch taxlab-v2.0.0.post1 https://github.com/hyunae52/korean-taxlaw-mcp.git
 cd korean-taxlaw-mcp
 python3 -m venv .venv
 source .venv/bin/activate

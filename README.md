@@ -1,10 +1,18 @@
 # korean-taxlaw-mcp
 
+> **TaxLab downstream limited beta (`2.0.0.post1`):** 이 저장소는
+> [`zisu17/korean-taxlaw-mcp`](https://github.com/zisu17/korean-taxlaw-mcp)
+> `v2.0.0`을 기준으로 검토한 Hyunae 운영 포크입니다. 운영은 이 포크의 고정 커밋을
+> 사용하고 원본 변경은 매일 후보로만 확인합니다. 자동 병합·배포하지 않습니다.
+> 신고·불복 등 실제 업무의 단독 근거로 사용하지 마세요.
+
 국세·지방세 법령정보시스템의 원문을 직접 조회하는 한국 세법 MCP 서버입니다.
 
 - 국세청 세법해석례·판례·결정례·기본통칙 검색
 - 행정안전부 지방세 유권해석과 지방세 심판·판례 검색
 - 문서번호로 정확한 문서를 찾아 본문까지 조회
+- 동일한 문서번호가 여러 건이면 임의 선택하지 않고 등록일·제목·요약·문서 ID가 포함된
+  후보를 반환하며, 주제 문맥으로 한 건이 확인될 때만 본문 조회
 - 출처 URL과 근거 유형을 포함한 구조화 응답
 
 > 법률·시행령·시행규칙 본문은 제공하지 않습니다. 해당 자료는 국가법령정보센터 기반의
@@ -36,7 +44,8 @@ korean-taxlaw-mcp를 이 컴퓨터에 로컬 MCP로 설치해줘.
 현재 사용 중인 Claude Desktop 앱의 로컬 STDIO MCP 서버로 등록하고,
 이름은 korean-taxlaw로 지정해줘.
 
-저장소: https://github.com/zisu17/korean-taxlaw-mcp
+저장소: https://github.com/hyunae52/korean-taxlaw-mcp
+설치 기준: taxlab-v2.0.0.post1
 
 uv가 없으면 먼저 설치해. 그런 다음 uv tool로 패키지를 설치하고 실행 파일의 절대경로를
 찾아 Claude Desktop 설정에 넣어줘. 기존 MCP 설정은 그대로 두고, 끝나면 앱 재시작 방법을
@@ -53,7 +62,8 @@ korean-taxlaw-mcp를 이 컴퓨터에 로컬 MCP로 설치해줘.
 현재 사용 중인 ChatGPT 데스크톱 앱의 Codex에서 쓸 로컬 STDIO MCP 서버로
 등록하고, 이름은 korean-taxlaw로 지정해줘.
 
-저장소: https://github.com/zisu17/korean-taxlaw-mcp
+저장소: https://github.com/hyunae52/korean-taxlaw-mcp
+설치 기준: taxlab-v2.0.0.post1
 
 uv가 없으면 먼저 설치해. 그런 다음 uv tool로 패키지를 설치하고 실행 파일의 절대경로를
 찾아 ChatGPT 데스크톱 앱의 Codex MCP 설정에 넣어줘. 기존 MCP 설정은 그대로 두고,
@@ -86,11 +96,14 @@ MCP가 연결된 대화 창에서 일반 문장으로 요청하면 됩니다.
 - [개발 가이드](docs/DEVELOPMENT.md) — 개발 환경과 테스트
 - [지원 범위 조사](docs/INVESTIGATION.md) — 원본 시스템 분석과 지원·미지원 데이터
 - [포크 유지관리](docs/FORK_MAINTENANCE.md) — upstream 동기화 후보와 승인 절차
+- [제한 베타 범위](docs/LIMITED_BETA.md) — 설치 기준, 데이터 취급과 비보장 범위
 
 ## 알아두기
 
 - 원본 시스템에서 조세 자료로 분류한 문서만 조회합니다.
 - 원본이 본문을 제공하지 않는 자료는 메타데이터나 파일 식별자만 반환합니다.
+- 중복 후보의 날짜는 검색 결과가 제공한 `registrationDate`입니다. 후보를 문서 ID로
+  상세 조회하면 별도 `productionDate`가 제공될 수 있습니다.
 - 이 서버는 원문 검색과 구조화를 위한 도구이며 세무 자문을 제공하지 않습니다. 신고·불복 등
   법적 효과가 있는 판단에는 현행 법령과 원문을 확인하고 전문가의 검토를 받으세요.
 

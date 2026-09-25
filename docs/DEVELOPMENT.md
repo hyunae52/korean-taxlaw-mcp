@@ -8,8 +8,9 @@
 ## 개발 환경
 
 ```bash
-git clone https://github.com/zisu17/korean-taxlaw-mcp.git
+git clone https://github.com/hyunae52/korean-taxlaw-mcp.git
 cd korean-taxlaw-mcp
+git remote add upstream https://github.com/zisu17/korean-taxlaw-mcp.git
 uv sync --extra dev
 ```
 
