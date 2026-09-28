@@ -5,13 +5,14 @@
 (:mod:`tests.test_tools`)와 분리해 두고, 업스트림은 fixture 로 대신한다.
 
 ``11`` 감사원 심사청구는 본문이 없고 첨부 PDF/HWP 로만 존재하므로, 첨부 다운로드
-확인(HEAD + 필요 시 GET)도 respx 로 함께 막는다 — 네트워크 없이 "스토리지 공백" 판정까지
+확인(최대 4 KiB Range GET)도 respx 로 함께 막는다 — 네트워크 없이 "본문 미제공" 판정까지
 검증하려는 목적이다.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -175,7 +176,8 @@ async def test_audit_appeal_attachment_status_reports_storage_gap(upstream) -> N
     attachment = data["items"][0]["attachment"]
     assert attachment["available"] is False
     assert "원문 파일 미제공" in attachment["unavailableReason"]
-    assert data["attachmentCheckedOn"] == special.ATTACHMENT_STORAGE_GAP_DETECTED_ON
+    assert data["attachmentCheckedOn"] == datetime.now(timezone.utc).date().isoformat()
+    assert data["attachmentGapMeasuredOn"] == special.ATTACHMENT_STORAGE_GAP_DETECTED_ON
     assert data["attachmentGapMeasured"] == special.ATTACHMENT_STORAGE_GAP_MEASURED
     # 첨부 확인은 돌려줄 행마다 요청한다. fixture 는 limit 과 무관하게 2행을 주므로
     # "마지막 호출"이 아니라 "돌려준 행이 실제로 확인됐는지"를 본다.
@@ -201,8 +203,8 @@ async def test_audit_appeal_attachment_status_when_file_is_served(upstream) -> N
     assert attachment["format"] == "pdf"
 
 
-async def test_attachment_probe_treats_large_octet_stream_as_available(upstream) -> None:
-    """HEAD 크기만 보고 판단하지 않는다 — 작은 octet-stream 만 본문까지 확인한다."""
+async def test_attachment_probe_checks_file_bytes(upstream) -> None:
+    """헤더나 크기 대신 본문의 파일 서명으로 확보 여부를 확인한다."""
     upstream.attachment_available = False
     available, reason = await special.probe_attachment(
         f"{DOWNLOAD_URL}?fleId=1&fleSn=2"

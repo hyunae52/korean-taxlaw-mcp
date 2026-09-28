@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -82,14 +83,13 @@ ATTACHMENT_PATH = "/downloadFile.do"
 #: 11 의 결정번호·제목·요지 화면(행별 딥링크가 없다 — 팝업이 목록 전체를 다시 그린다).
 AUDIT_APPEAL_LIST_URL = SOURCE_PAGE[AUDIT_APPEAL]
 
-#: "파일 없음"일 때 서버가 돌려주는 자체 404 페이지의 크기(실측 1,992바이트).
-#: 이보다 큰 octet-stream 은 실제 파일로 본다.
-_ERROR_PAGE_MAX_BYTES = 4096
+#: Range를 무시하는 서버에서도 이만큼만 읽고 스트림을 닫는다.
+_ATTACHMENT_PREFIX_BYTES = 4096
 
 ATTACHMENT_STORAGE_GAP_NOTE = (
-    "메타데이터(파일명·크기)는 원본 DB 에 있으나 원본 스토리지에 파일이 없습니다. "
-    "서버는 Content-Disposition 을 정상으로 붙인 뒤 본문 대신 자체 404 페이지를 보냅니다. "
-    "문서 부존재가 아니라 **원문 파일 미제공**입니다."
+    "2026-09-28 조사 표본에서 메타데이터가 존재해도 파일 대신 오류 HTML이 반환됐습니다. "
+    "이 기록은 과거 관측이며 현재 확보 여부는 각 attachment 상태를 확인하세요. "
+    "본문 미확보를 문서 부존재나 물리 스토리지 상태의 확정으로 해석하지 마세요."
 )
 
 #: 실측 조건 — 문서 부존재로 오해하지 않도록 조사 시점과 경계를 함께 남긴다.
@@ -127,7 +127,7 @@ def _domain_for(doc_class: str) -> str:
 
 def attachment_url(fle_id: str, fle_sn: str | int) -> str:
     """첨부 다운로드 주소. 목록 행의 fleId·fleSn 만으로 만들 수 있다."""
-    return f"{NTS_ORIGIN}{ATTACHMENT_PATH}?fleId={fle_id}&fleSn={fle_sn}"
+    return f"{NTS_ORIGIN}{ATTACHMENT_PATH}?{urlencode({'fleId': fle_id, 'fleSn': fle_sn})}"
 
 
 def _params(
@@ -236,16 +236,27 @@ async def search_special_documents(
         ttl=TTL.SEARCH,
     )
 
-    rows = (payload or {}).get(_ROW_LIST_KEY[doc_class]) or []
+    key = _ROW_LIST_KEY[doc_class]
+    if not isinstance(payload, dict) or key not in payload or "recordCount" not in payload:
+        raise upstream("검색 응답의 목록 또는 건수 필드가 없습니다.", actionId=action_id)
+    rows = payload[key]
+    try:
+        total = int(payload["recordCount"])
+    except (ValueError, TypeError) as exc:
+        raise upstream("검색 응답의 건수 형식이 잘못됐습니다.", actionId=action_id) from exc
+    if rows is None and total == 0:
+        rows = []
+    if total < 0 or not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise upstream("검색 응답의 목록 형식이 잘못됐습니다.", actionId=action_id)
     level = str(authority_for_doc_class(doc_class))
-    items = [_row_to_item(doc_class, row, level) for row in rows]
+    items = [_row_to_item(doc_class, row, level) for row in rows[:limit]]
 
     out: dict[str, Any] = {
         "docClass": doc_class,
         "documentType": _label(doc_class),
         "authorityLevel": level,
         "sourcePage": SOURCE_PAGE[doc_class],
-        "total": int((payload or {}).get("recordCount") or 0),
+        "total": total,
         "page": page,
         "limit": limit,
         "items": items,
@@ -256,7 +267,7 @@ async def search_special_documents(
         out["bodyNote"] = (
             "감사원 심사청구는 사이트가 본문을 HTML 로 제공하지 않습니다. 본문은 행의 "
             "attachment(첨부 PDF/HWP)에만 있고, 원본 스토리지에 파일이 없는 구간이 있습니다. "
-            "attachmentStatus=true 로 행별 확보 여부를 확인할 수 있습니다."
+            "attachment_status=true 로 행별 확보 여부를 확인할 수 있습니다."
         )
     elif doc_class == TAXPAYER_PROTECTION:
         out["note"] = "본문은 get_tax_document(ntst_dcm_id)로 조회합니다."
@@ -288,7 +299,7 @@ def _row_to_item(doc_class: str, row: dict[str, Any], level: str) -> dict[str, A
                 {
                     "fleId": fle_id or None,
                     "fleSn": fle_sn,
-                    "downloadUrl": attachment_url(fle_id, fle_sn) if fle_id and fle_sn else None,
+                    "downloadUrl": attachment_url(fle_id, fle_sn) if fle_id and fle_sn is not None else None,
                 }
             ),
         }
@@ -336,7 +347,7 @@ async def get_attachment_info(
     하며, 실패하면 그대로 이유를 남긴다 — 서버 오류 페이지를 파일로 저장하지 않는다.
     """
     fid = str(fle_id or "").strip()
-    fsn = str(fle_sn or "").strip()
+    fsn = str(fle_sn).strip() if fle_sn is not None else ""
     if not fid or not fsn:
         raise NtsError(ErrorCode.INVALID_INPUT, "fle_id 와 fle_sn 이 모두 필요합니다.")
 
@@ -365,6 +376,7 @@ async def get_attachment_info(
     if verify:
         available, reason = await probe_attachment(url, referer=referer)
         info["available"] = available
+        info["availabilityCheck"] = "file_signature_prefix_only"
         if not available:
             info["unavailableReason"] = reason or ATTACHMENT_STORAGE_GAP_NOTE
     return drop_empty(info)
@@ -373,9 +385,9 @@ async def get_attachment_info(
 async def probe_attachment(url: str, *, referer: str | None = None) -> tuple[bool, str | None]:
     """첨부가 실제로 내려오는지 확인한다. ``(확보가능, 불가사유)``.
 
-    ``HEAD`` 로 크기만 보고(본문을 받지 않는다), 작은 ``application/octet-stream`` 일
-    때만 본문을 받아 오류 페이지인지 확인한다. 실측: 정상 파일은 content-length 가
-    실제 파일 크기(수십~수백 KB)이고, 파일이 없으면 1,992바이트 HTML 이 온다.
+    헤더만으로 성공을 선언하지 않는다. Range GET으로 최대 4 KiB의 파일 서명을
+    확인하며, Range가 무시돼도 본문 전체를 내려받지 않는다. 전체 파일 무결성이나
+    텍스트 추출의 성공을 뜻하지 않는다. 장애/알 수 없는 응답은 부존재와 구분한다.
     """
     verdict = upstream_limiter.take(1)
     if not verdict.ok:
@@ -386,34 +398,28 @@ async def probe_attachment(url: str, *, referer: str | None = None) -> tuple[boo
         )
 
     client = await get_client()
-    headers = {"referer": referer or SOURCE_PAGE[AUDIT_APPEAL]}
+    headers = {"referer": referer or SOURCE_PAGE[AUDIT_APPEAL],
+               "range": f"bytes=0-{_ATTACHMENT_PREFIX_BYTES - 1}", "accept-encoding": "identity"}
     try:
-        head = await client.head(url, headers=headers)
+        async with client.stream("GET", url, headers=headers) as response:
+            if response.status_code in (404, 410):
+                return False, f"첨부 URL이 HTTP {response.status_code}로 응답했습니다(원문 파일 미제공)."
+            if response.status_code not in (200, 206):
+                raise upstream("첨부 확인 응답을 검증하지 못했습니다.",
+                               status=response.status_code)
+            prefix = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=_ATTACHMENT_PREFIX_BYTES):
+                prefix.extend(chunk[:_ATTACHMENT_PREFIX_BYTES - len(prefix)])
+                if len(prefix) >= _ATTACHMENT_PREFIX_BYTES:
+                    break
     except httpx.HTTPError as exc:
         raise upstream(f"첨부 확인 요청 실패: {exc}", url=url) from exc
-
-    if head.status_code >= 400:
-        return False, f"원본이 HTTP {head.status_code} 로 응답했습니다(원문 파일 미제공)."
-
-    content_type = str(head.headers.get("content-type") or "")
-    try:
-        length = int(head.headers.get("content-length") or 0)
-    except ValueError:
-        length = 0
-
-    if not content_type.startswith("application/octet-stream") or length > _ERROR_PAGE_MAX_BYTES:
-        return True, None
-
-    # 작은 octet-stream 은 오류 페이지일 수 있다 — 본문 앞부분을 받아 확인한다.
-    try:
-        response = await client.get(url, headers=headers)
-    except httpx.HTTPError as exc:
-        raise upstream(f"첨부 확인 요청 실패: {exc}", url=url) from exc
-
-    body = response.content
+    body = bytes(prefix)
     if _is_error_page(body):
-        return False, ATTACHMENT_STORAGE_GAP_NOTE
-    return True, None
+        return False, "첨부 URL이 파일 대신 HTML을 반환했습니다(원문 파일 미제공). 저장소 공백인지 일시 장애인지는 별도 확인이 필요합니다."
+    if body.startswith((b"%PDF-", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", b"HWP Document File", b"PK\x03\x04")):
+        return True, None
+    raise upstream("첨부 응답에서 지원 파일 서명을 확인하지 못했습니다. 파일 부존재로 판단하지 않습니다.")
 
 
 def _is_error_page(body: bytes) -> bool:
@@ -422,7 +428,10 @@ def _is_error_page(body: bytes) -> bool:
     서버는 Content-Disposition 을 정상으로 붙이면서 본문만 자기 404 HTML 로 바꾼다.
     그래서 확장자가 아니라 **본문 선두**를 본다(대소문자·선행 개행 무시).
     """
-    head = body[:64].lstrip().lower()
+    head = body[:64].lstrip()
+    if head.startswith(b"\xef\xbb\xbf"):
+        head = head[3:].lstrip()
+    head = head.lower()
     return head.startswith(b"<!doctype") or head.startswith(b"<html")
 
 

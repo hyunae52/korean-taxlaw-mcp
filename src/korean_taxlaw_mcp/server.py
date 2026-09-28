@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
@@ -197,6 +198,19 @@ def _merge_law(query: str | None, law: str | None, article: str | None) -> str |
     return " ".join(parts) if parts else None
 
 
+def _check_special_search_filters(*, match: str, exclude: list[str] | None,
+                                  sort: str | None, law: str | None = None,
+                                  article: str | None = None) -> None:
+    unsupported = [name for name, supplied in (
+        ("match=any", match != "all"), ("exclude", bool(exclude)),
+        ("sort", sort is not None), ("law", bool(law)), ("article", bool(article)),
+    ) if supplied]
+    if unsupported:
+        raise NtsError(ErrorCode.INVALID_INPUT,
+                       "이 문서구분에서 지원하지 않는 검색 조건입니다: " + ", ".join(unsupported),
+                       hints=["지원 조건으로 다시 조회하세요. 조건을 조용히 무시하지 않습니다."])
+
+
 async def _run_special_search(
     *,
     doc_class: str,
@@ -241,7 +255,8 @@ async def _run_special_search(
                 checked.append(item)
                 continue
             status = await resolve_attachment_status(
-                str(attachment["fleId"]), str(attachment["fleSn"])
+                str(attachment["fleId"]),
+                str(attachment["fleSn"]) if attachment.get("fleSn") is not None else "",
             )
             checked.append({**item, "attachment": {**attachment, **status}})
         result = {
@@ -249,7 +264,8 @@ async def _run_special_search(
             "items": checked,
             "attachmentGapNote": ATTACHMENT_STORAGE_GAP_NOTE,
             "attachmentGapMeasured": ATTACHMENT_STORAGE_GAP_MEASURED,
-            "attachmentCheckedOn": ATTACHMENT_STORAGE_GAP_DETECTED_ON,
+            "attachmentCheckedOn": datetime.now(timezone.utc).date().isoformat(),
+            "attachmentGapMeasuredOn": ATTACHMENT_STORAGE_GAP_DETECTED_ON,
         }
 
     payload: dict[str, Any] = {"domain": domain, **result}
@@ -354,6 +370,7 @@ async def lookup_tax_document(
     description=(
         "국세청 세법해석례(예규: 사전답변·질의회신·과세기준자문·고시서면질의)를 검색한다. "
         "type='curated_issue' 는 같은 해석례를 쟁점별로 다시 묶은 자주찾는 쟁점별 사례(13)다. "
+        "13은 일반 텍스트 query와 단일 세목만 지원하며 OR·제외어·정렬·법령/조문·날짜 필터는 지원하지 않는다. "
         "결과는 요지까지만 담은 후보 목록이며 본문은 포함하지 않는다 — 필요한 문서만 "
         "get_tax_document 로 상세 조회할 것. 공백 구분 낱말은 AND, match='any' 는 OR, "
         "exclude 는 NOT. 문서번호를 알면 lookup_tax_document 를 쓸 것."
@@ -384,12 +401,16 @@ async def search_tax_interpretations(
 
     # 13(자주찾는 쟁점별 사례)은 공용 검색 액션을 쓰지 않는다 — domains/special.py 담당.
     if type == "curated_issue":
+        _check_special_search_filters(match=match, exclude=exclude, sort=sort,
+                                      law=law, article=article)
         if date_from or date_to:
             raise NtsError(
                 ErrorCode.INVALID_INPUT,
                 "자주찾는 쟁점별 사례(13)는 원본이 등록일 필터를 제공하지 않습니다.",
             )
         codes, unresolved = _resolve_tax_types(tax_type)
+        if len(codes) > 1:
+            raise NtsError(ErrorCode.INVALID_INPUT, "자주찾는 쟁점별 사례는 한 번에 세목 하나만 검색할 수 있습니다.")
         if not query and not codes:
             raise NtsError(
                 ErrorCode.INVALID_INPUT,
@@ -441,7 +462,9 @@ async def search_tax_interpretations(
         "국세청·조세심판원·법원의 판례·결정례(과세적부·이의신청·심사청구·심판청구·판례·헌재)를 "
         "검색한다. type='audit_appeal'(11 감사원 심사청구)·'taxpayer_protection'(14 납세자보호위원회 "
         "심의사례)은 원본이 별도 모듈로 제공하는 문서구분이다 — 감사원 심사청구는 본문이 없고 "
-        "첨부 PDF/HWP 로만 존재한다(attachmentStatus=true 로 행별 확보 여부 확인). "
+        "첨부 PDF/HWP 로만 존재한다(attachment_status=true 로 파일 서명 앞부분 확인, 전체 파일 검증 아님). "
+        "11·14는 일반 텍스트 query·날짜만 지원하며 OR·제외어·정렬·세목 필터는 지원하지 않는다. "
+        "11의 결정번호는 query에 넣는다. 11·14에서는 case_number exact lookup을 지원하지 않는다. "
         "결과는 본문 없는 후보 목록 — 필요한 문서만 get_tax_document 로 조회할 것. "
         "결정결과(인용·기각·국승·국패 등)와 귀속연도 필터는 05~10 에만 적용된다. "
         "사건번호를 알면 case_number 로 exact lookup 이 수행된다."
@@ -472,9 +495,17 @@ async def search_tax_decisions(
     limit: Annotated[int, Field(ge=1, le=100, description="페이지 크기. 명시 요청 없이는 늘리지 말 것.")] = DEFAULT_SEARCH_LIMIT,
     attachment_status: Annotated[
         bool,
-        Field(description="audit_appeal(11) 전용. 행마다 첨부 파일 확보 여부를 확인해 붙인다(행당 HEAD 1회 추가)."),
+        Field(description="audit_appeal(11) 전용. 행당 메타데이터 및 최대 4 KiB 파일 서명 요청으로 확인한다. 전체 파일 무결성은 검증하지 않는다."),
     ] = False,
 ) -> str:
+    if attachment_status and type != "audit_appeal":
+        raise NtsError(ErrorCode.INVALID_INPUT, "attachment_status는 audit_appeal 전용입니다.")
+    if type in _SPECIAL_DECISION_TYPE_CODE:
+        _check_special_search_filters(match=match, exclude=exclude, sort=sort)
+        if tax_type or case_number:
+            raise NtsError(ErrorCode.INVALID_INPUT,
+                           "11·14는 tax_type 및 case_number를 지원하지 않습니다.",
+                           hints=["감사원 결정번호는 type='audit_appeal'과 query로 검색하세요."])
     if case_number and case_number.strip():
         return await lookup_tax_document(document_number=case_number, context_query=query)
 
