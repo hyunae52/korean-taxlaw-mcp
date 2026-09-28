@@ -412,3 +412,53 @@ async def test_local_tools_via_mcp_client() -> None:
     assert data["error"]["detail"]["exactMatch"] is False
     assert data["error"]["detail"]["similarDocuments"]
     assert "추측" in data["guardrail"]
+
+
+# Special document types have separate source actions and must work through MCP.
+@pytest.mark.parametrize("tool,kind,query", [
+    ("search_tax_interpretations", "curated_issue", "상속"),
+    ("search_tax_decisions", "taxpayer_protection", "세무조사"),
+])
+async def test_special_live_search_to_body(tool, kind, query):
+    label, result = await call(tool, {"type": kind, "query": query, "limit": 2})
+    assert label == "OK", result
+    assert 0 < len(result["items"]) <= 2
+    document_id = result["items"][0]["ntstDcmId"]
+    label, detail = await call("get_tax_document", {
+        "ntst_dcm_id": document_id, "detail": "full", "body_limit": 5000,
+    })
+    assert label == "OK", detail
+    assert detail["document"]["ntstDcmId"] == document_id
+    body_fields = ("fullText", "facts", "question", "answer", "reasoning",
+                   "conclusion", "claimantView", "agencyView", "preamble")
+    assert any(detail["document"].get(field) for field in body_fields)
+
+
+async def test_special_live_audit_attachment():
+    label, result = await call("search_tax_decisions", {
+        "type": "audit_appeal", "query": "2024심사636",
+        "attachment_status": True, "limit": 1,
+    })
+    assert label == "OK", result
+    assert len(result["items"]) == 1
+    assert result["items"][0]["documentNumber"] == "2024심사636"
+    attachment = result["items"][0]["attachment"]
+    assert attachment.get("available") is True, attachment
+    assert attachment["availabilityCheck"] == "file_signature_prefix_only"
+
+
+@pytest.mark.parametrize("tool,kind,query", [
+    ("search_tax_interpretations", "curated_issue", "상속"),
+    ("search_tax_decisions", "audit_appeal", "법인세"),
+    ("search_tax_decisions", "taxpayer_protection", "세무조사"),
+])
+async def test_special_live_pages_do_not_repeat(tool, kind, query):
+    pages = []
+    for page in (1, 2):
+        label, result = await call(tool, {
+            "type": kind, "query": query, "page": page, "limit": 2,
+        })
+        assert label == "OK", result
+        assert 0 < len(result["items"]) <= 2
+        pages.append({item.get("ntstDcmId") or item["documentNumber"] for item in result["items"]})
+    assert pages[0].isdisjoint(pages[1]), (kind, pages)

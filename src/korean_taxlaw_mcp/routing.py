@@ -24,6 +24,7 @@ _PHRASE_TO_DOMAIN: list[tuple[re.Pattern[str], str, tuple[str, ...]]] = [
     (re.compile(r"(?<![가-힣])사전(?![가-힣])"), "interpretation", ("01",)),
     (re.compile(r"과세\s*기준\s*자문|기준\s*자문"), "interpretation", ("03",)),
     (re.compile(r"고시\s*서면\s*질의"), "interpretation", ("04",)),
+    (re.compile(r"자주\s*찾는\s*쟁점|쟁점별\s*사례"), "interpretation", ("13",)),
     (re.compile(r"예규|국세청\s*해석|세법\s*해석|법령해석"), "interpretation", ()),
     (re.compile(r"과세\s*적부|적부"), "decision", ("05",)),
     (re.compile(r"이의\s*신청"), "decision", ("06",)),
@@ -31,6 +32,8 @@ _PHRASE_TO_DOMAIN: list[tuple[re.Pattern[str], str, tuple[str, ...]]] = [
     (re.compile(r"심판\s*청구|조세심판|심판례|조심"), "decision", ("08",)),
     (re.compile(r"판례|대법원|고등법원|행정법원"), "decision", ("09",)),
     (re.compile(r"헌재|헌법재판소"), "decision", ("10",)),
+    (re.compile(r"감사원\s*심사|감심"), "decision", ("11",)),
+    (re.compile(r"납세자\s*보호\s*위원회|납보위"), "decision", ("14",)),
     (re.compile(r"불복"), "decision", ()),
     (re.compile(r"기본\s*통칙|통칙"), "guidance", ()),
     (re.compile(r"세법\s*집행\s*기준|집행\s*기준"), "guidance", ()),
@@ -49,13 +52,15 @@ _NTS_MARKERS = re.compile(r"국세청|국세|세무|세법|예규|과세|납세|
 #: 보고하고 필터로 쓰지 않으며, 낱말은 검색어에 그대로 남긴다.
 _STRIP_FOR_SEARCH = [
     "국세법령정보시스템", "국세법령정보", "납세자보호위원회",
+    "감사원 심사청구", "감사원심사청구", "자주찾는 쟁점별 사례", "자주찾는쟁점별사례",
+    "납세자보호위원회 심의사례", "심의사례",
     "과세기준자문", "고시서면질의", "질의회신", "서면질의", "사전답변", "기준자문",
     "세법해석", "법령해석", "과세적부", "이의신청", "심사청구", "심판청구", "조세심판",
     "헌법재판소", "행정법원", "고등법원", "지방법원", "대법원",
     "집행기준", "기본통칙", "국세청", "예규", "통칙", "훈령", "판례", "심판례", "결정례",
     "적부", "불복", "헌재", "서식", "별표", "찾아줘", "알려줘", "검토해줘",
     # 짧은 약칭은 반드시 맨 뒤 — 앞의 긴 표현("서면질의")이 먼저 지워져야 한다
-    "서면", "사전",
+    "감심", "쟁점별사례", "감사원", "서면", "사전",
 ]
 
 _DOCNUM_SHAPE = re.compile(r"[가-힣]{2,6}\s*-\s*[0-9가-힣]+\s*-\s*[0-9가-힣]+(\s*-\s*[0-9,]+)?")
@@ -128,6 +133,12 @@ def route_query(query: str | None) -> RouteHint:
             if code not in doc_classes:
                 doc_classes.append(code)
         reasons.append(f"표현 '{pattern.pattern}' → {domain}")
+
+    # 감사원 심사청구(11)는 '심사청구'라는 낱말이 국세청 심사청구(07)와 겹친다.
+    # 둘 다 남기면 엉뚱한 영역을 조회하므로 감사원 표현이 잡히면 07 을 뺀다.
+    if "11" in doc_classes and "07" in doc_classes:
+        doc_classes.remove("07")
+        reasons.append("감사원 심사청구(11)로 좁혀 국세청 심사청구(07) 제외")
 
     # 세목은 참고용으로만 추정한다.
     tax_codes: list[str] = []
