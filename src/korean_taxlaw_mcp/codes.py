@@ -49,6 +49,19 @@ DOC_CLASS_ABBR: dict[str, str] = {
     "감사": "11",
 }
 
+# 화면 메뉴 이름 (공통코드 19378 의 cdVvalKrnNm 과 **다르다**).
+
+#: DOC_CLASS 는 사이트 코드표(19378)의 이름을 그대로 옮긴 것이라 바꾸면
+#: `tests/test_parsers.py::test_code_tables_match_constants` 가 깨진다. 그런데 그
+#: 이름은 화면에 보이는 메뉴명과 다르다(11=감사, 13=쟁점). 사용자가 실제로 보는
+#: 이름이 필요할 때만 이 표를 쓴다 — 원본 코드표와 화면 이름을 분리해 둔다.
+#: 11·13·14 는 공용 검색 액션을 쓰지 않아 domains/special.py 가 이 값을 쓴다.
+DOC_CLASS_MENU: dict[str, str] = {
+    "11": "감사원 심사청구",
+    "13": "자주찾는 쟁점별 사례",
+    "14": "납세자보호위원회 심의사례",
+}
+
 # 검색 컬렉션. 문서구분에 따라 갈리며 잘못 주면 0건이 온다.
 COLLECTION_QUESTION = "question,question_gr"
 COLLECTION_PRECEDENT = "precedent,precedent_gr"
