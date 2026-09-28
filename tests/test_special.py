@@ -169,7 +169,7 @@ async def test_audit_appeal_attachment_status_reports_storage_gap(upstream) -> N
     """원본 스토리지에 파일이 없으면 그대로 알린다 — 오류 페이지를 파일로 저장하지 않는다."""
     label, data = await call(
         "search_tax_decisions",
-        {"type": "audit_appeal", "limit": 2, "attachment_status": True},
+        {"type": "audit_appeal", "limit": 1, "attachment_status": True},
     )
     assert label == "OK"
     attachment = data["items"][0]["attachment"]
@@ -177,7 +177,14 @@ async def test_audit_appeal_attachment_status_reports_storage_gap(upstream) -> N
     assert "원문 파일 미제공" in attachment["unavailableReason"]
     assert data["attachmentCheckedOn"] == special.ATTACHMENT_STORAGE_GAP_DETECTED_ON
     assert data["attachmentGapMeasured"] == special.ATTACHMENT_STORAGE_GAP_MEASURED
-    assert upstream.last_params("ACMCMA001MR02")["fleId"] == attachment["fleId"]
+    # 첨부 확인은 돌려줄 행마다 요청한다. fixture 는 limit 과 무관하게 2행을 주므로
+    # "마지막 호출"이 아니라 "돌려준 행이 실제로 확인됐는지"를 본다.
+    probed = [
+        params["fleId"]
+        for action_id, params in upstream.calls
+        if action_id == "ACMCMA001MR02"
+    ]
+    assert attachment["fleId"] in probed
 
 
 async def test_audit_appeal_attachment_status_when_file_is_served(upstream) -> None:

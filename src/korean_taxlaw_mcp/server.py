@@ -487,7 +487,17 @@ async def search_tax_decisions(
             hints=[f"사용 가능한 값: {', '.join(dict.fromkeys(DECISION_RESULT.values()))}"],
         )
     merged = _merge_law(query, law, article)
-    if not merged and not codes and not result_codes and not date_from and not date_to and not attribution_year:
+    # 11 감사원 심사청구·14 납세자보호위원회는 원본 화면이 전체 목록 열람을 허용한다.
+    # 다른 문서구분은 키워드 없이 전량 조회를 막지만, 이 둘은 조건 없이도 조회되게 둔다.
+    if (
+        type not in _SPECIAL_DECISION_TYPE_CODE
+        and not merged
+        and not codes
+        and not result_codes
+        and not date_from
+        and not date_to
+        and not attribution_year
+    ):
         raise NtsError(
             ErrorCode.INVALID_INPUT,
             "query, tax_type, result, attribution_year, date_from/date_to 중 최소 하나는 필요합니다.",
