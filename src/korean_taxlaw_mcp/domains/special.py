@@ -1,0 +1,441 @@
+"""사이트가 공용 액션을 쓰지 않는 문서구분.
+
+해석례(01~04)와 결정례(05~10)는 검색 ``ASIPDI002PR01`` · 상세 ``ASIQTB002PR01`` 두
+액션을 공유한다(:mod:`~korean_taxlaw_mcp.domains.documents`). 아래 세 문서구분은 그
+경로를 타지 않는다.
+
+* ``11`` 감사원 심사청구 — 전용 검색 액션만 있고 **본문이 없다**. 본문은 첨부 PDF/HWP
+  이며, 원본 스토리지에 파일이 없으면 서버가 자기 404 페이지를 ``Content-Disposition``
+  과 함께 돌려준다(:data:`ATTACHMENT_STORAGE_GAP_NOTE`).
+* ``13`` 자주찾는 쟁점별 사례 — 큐레이션된 해석례. 전용 검색 액션과 쟁점 분류가 있고,
+  상세는 공용 상세 액션(``ASIQTB002PR01``)을 그대로 쓴다.
+* ``14`` 납세자보호위원회 심의사례 — 전용 검색 액션, 상세는 공용 상세 액션.
+
+셋을 한 모듈로 묶은 이유: 셋 다 "공용 검색 경로를 쓰지 않는 예외"라 성격이 같고, 각각을
+별 모듈로 나누면 세 파일이 서로 다른 관용구로 갈라진다. 대신 액션 ID·응답 필드 이름을
+표로 고정해 두고 한 구현으로 처리한다.
+
+검색 파라미터 의미는 전부 실측으로 확정했다(2026-09-28 기준).
+
+* ``11`` — ``ntstDcmTtl`` 은 제목+요지 색인(전체 3,124건 중 '법인세' → 443건),
+  ``ntstDcmDscmCntn`` 은 결정번호 정확일치('2025심사2038' → 1건). ``bltnStrtDt``/
+  ``bltnEndDt`` 를 **빼면 서버가 status=ERROR 로 응답한다** — 빈 문자열이라도 반드시 넣는다.
+* ``13`` — ``schNtstDcmTtl``·``schNtstDcmGistCntn``·``schNtstDcmDscmCntn`` 은 서로 AND 다
+  ('상속' → 제목 126건 / 요지 163건 / 둘 다 117건). ``ntstDcmPntClCd``(쟁점분류 19396)
+  필터가 그대로 먹는다('304001' → 20건).
+* ``14`` — ``searchCondition`` + ``searchKeyword`` 조합이고 ``ntstDcmClCd="14"`` 를
+  **강제로 넣어야 한다**(빼면 0건). 등록기간 필터는 ``bltnStrtDt``/``bltnEndDt`` 다.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+import httpx
+
+from ..action_client import call_action, get_client
+from ..cache import TTL
+from ..codes import DOC_CLASS_MENU
+from ..config import NTS_ORIGIN
+from ..errors import ErrorCode, NtsError, not_found, upstream
+from ..model import AuthorityLevel, authority_for_doc_class
+from ..payload import drop_empty
+from ..query import format_date, to_site_date
+from ..rate_limit import upstream_limiter
+
+AUDIT_APPEAL = "11"
+CURATED_ISSUE = "13"
+TAXPAYER_PROTECTION = "14"
+
+#: 공용 검색 경로(``ASIPDI002PR01``)를 쓰지 않는 문서구분.
+SPECIAL_CLASSES: tuple[str, ...] = (AUDIT_APPEAL, CURATED_ISSUE, TAXPAYER_PROTECTION)
+
+#: 문서구분 → 전용 검색 액션.
+_SEARCH_ACTION: dict[str, str] = {
+    AUDIT_APPEAL: "ASIPDM001MR01",
+    CURATED_ISSUE: "ASIQTH001MR01",
+    TAXPAYER_PROTECTION: "ASIPRC019MR02",
+}
+
+#: 응답에서 목록이 담기는 필드 이름. 액션마다 다르다 — 이름을 틀리면 조용히 0건이 된다.
+_ROW_LIST_KEY: dict[str, str] = {
+    AUDIT_APPEAL: "badiRvwDVOList",
+    CURATED_ISSUE: "pntThanBkmrDVOList",
+    TAXPAYER_PROTECTION: "dcmBscDVOList",
+}
+
+#: 액션 호출에 쓸 Referer(사이트 화면). 없어도 동작하지만 예의상 화면 주소를 보낸다.
+SOURCE_PAGE: dict[str, str] = {
+    AUDIT_APPEAL: f"{NTS_ORIGIN}/pd/USEPDM001M.do",
+    CURATED_ISSUE: f"{NTS_ORIGIN}/qt/USEQTH001M.do",
+    TAXPAYER_PROTECTION: f"{NTS_ORIGIN}/bg/USEBGF001M.do",
+}
+
+#: 첨부 파일 메타데이터 액션. fleId(+fleSn)를 주면 파일명·형식·크기·스토리지 경로·
+#: 다운로드 URI 를 돌려준다.
+FILE_INFO_ACTION = "ACMCMA001MR02"
+
+#: 첨부 다운로드 경로. 목록 행의 fleDwldUri 가 가리키는 곳과 같다.
+ATTACHMENT_PATH = "/downloadFile.do"
+
+#: 11 의 결정번호·제목·요지 화면(행별 딥링크가 없다 — 팝업이 목록 전체를 다시 그린다).
+AUDIT_APPEAL_LIST_URL = SOURCE_PAGE[AUDIT_APPEAL]
+
+#: "파일 없음"일 때 서버가 돌려주는 자체 404 페이지의 크기(실측 1,992바이트).
+#: 이보다 큰 octet-stream 은 실제 파일로 본다.
+_ERROR_PAGE_MAX_BYTES = 4096
+
+ATTACHMENT_STORAGE_GAP_NOTE = (
+    "메타데이터(파일명·크기)는 원본 DB 에 있으나 원본 스토리지에 파일이 없습니다. "
+    "서버는 Content-Disposition 을 정상으로 붙인 뒤 본문 대신 자체 404 페이지를 보냅니다. "
+    "문서 부존재가 아니라 **원문 파일 미제공**입니다."
+)
+
+#: 실측 조건 — 문서 부존재로 오해하지 않도록 조사 시점과 경계를 함께 남긴다.
+ATTACHMENT_STORAGE_GAP_DETECTED_ON = "2026-09-28"
+ATTACHMENT_STORAGE_GAP_FIRST_BAD_BATCH = "2026-02-06"
+
+#: 스토리지 적재 배치(flePth)별 다운로드 성공/시도 실측치. 11 문서구분 한정.
+ATTACHMENT_STORAGE_GAP_MEASURED: list[dict[str, Any]] = [
+    {"storageBatch": "blrd/20251113", "checked": 56, "downloaded": 56},
+    {"storageBatch": "blrd/20260108", "checked": 33, "downloaded": 33},
+    {"storageBatch": "blrd/20260206", "checked": 12, "downloaded": 0},
+    {"storageBatch": "blrd/20260611", "checked": 16, "downloaded": 0},
+    {"storageBatch": "blrd/20260730", "checked": 3, "downloaded": 0},
+]
+
+_DOC_TYPE_LABEL: dict[str, str] = {
+    AUDIT_APPEAL: "감사원 심사청구",
+    CURATED_ISSUE: "자주찾는 쟁점별 사례",
+    TAXPAYER_PROTECTION: "납세자보호위원회 심의사례",
+}
+
+#: 감사원 심사청구의 결정번호 모양('2025심사2038'·'2011감심200').
+_DECISION_NUMBER = re.compile(r"^\d{4}\s*(감심|심사|심판|적부|이의)\s*-?\s*\d{1,6}$")
+
+
+def _label(doc_class: str) -> str:
+    """화면 표기 이름. 없으면 코드표(DOC_CLASS) 값으로 되돌아간다."""
+    return DOC_CLASS_MENU.get(doc_class) or _DOC_TYPE_LABEL.get(doc_class) or doc_class
+
+
+def _domain_for(doc_class: str) -> str:
+    """13 은 큐레이션된 해석례라 interpretation, 11·14 는 불복·심의 결정이다."""
+    return "interpretation" if doc_class == CURATED_ISSUE else "decision"
+
+
+def attachment_url(fle_id: str, fle_sn: str | int) -> str:
+    """첨부 다운로드 주소. 목록 행의 fleId·fleSn 만으로 만들 수 있다."""
+    return f"{NTS_ORIGIN}{ATTACHMENT_PATH}?fleId={fle_id}&fleSn={fle_sn}"
+
+
+def _params(
+    doc_class: str,
+    *,
+    query: str | None,
+    tax_type_codes: list[str] | None,
+    issue_codes: list[str] | None,
+    date_from: str | None,
+    date_to: str | None,
+    page: int,
+    limit: int,
+) -> dict[str, Any]:
+    """문서구분별 검색 파라미터. 필드 이름이 셋 다 다르므로 분기한다."""
+    start_date = to_site_date(date_from)
+    end_date = to_site_date(date_to)
+    text = (query or "").strip()
+
+    if doc_class == AUDIT_APPEAL:
+        # bltnStrtDt/bltnEndDt 를 빼면 서버가 ERROR 를 돌려준다(실측) — 빈 값도 넣는다.
+        return {
+            "ntstDcmDscmCntn": text if _looks_like_decision_number(text) else "",
+            "ntstDcmTtl": "" if _looks_like_decision_number(text) else text,
+            "bltnStrtDt": start_date,
+            "bltnEndDt": end_date,
+            "lnkClCd": "02",
+            "pageIndex": page,
+            "recordCountPerPage": limit,
+        }
+
+    if doc_class == CURATED_ISSUE:
+        return {
+            "ntstDcmClCd": "",
+            "ntstTlawClCd": (tax_type_codes or [""])[0],
+            "ntstDcmPntClCd": (issue_codes or [""])[0],
+            "schNtstDcmTtl": "",
+            "schNtstDcmGistCntn": text,
+            "schNtstDcmDscmCntn": "",
+            "pageIndex": page,
+            "recordCountPerPage": limit,
+        }
+
+    # TAXPAYER_PROTECTION — ntstDcmClCd 를 빼면 0건이 온다(실측).
+    return {
+        "searchCondition": "ntstDcmTtl" if text else "",
+        "searchKeyword": text,
+        "bltnStrtDt": start_date,
+        "bltnEndDt": end_date,
+        "pageIndex": page,
+        "recordCountPerPage": limit,
+        "ntstDcmClCd": TAXPAYER_PROTECTION,
+    }
+
+
+def _looks_like_decision_number(text: str) -> bool:
+    """'2025심사2038'·'2011감심200' 같은 결정번호 모양인지.
+
+    감사원 심사청구 검색창은 결정번호와 제목·요지가 **따로** 있고 서로 다른 필드다.
+    한 낱말을 양쪽에 넣으면 두 조건이 모두 걸려 0건이 되므로 한쪽만 고른다.
+    """
+    if not text or len(text) > 24 or " " in text:
+        return False
+    return bool(_DECISION_NUMBER.match(text))
+
+
+async def search_special_documents(
+    *,
+    doc_class: str,
+    query: str | None = None,
+    tax_type_codes: list[str] | None = None,
+    issue_codes: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """11·13·14 목록 검색. 반환 형태는 ``search_documents`` 와 맞춘다.
+
+    세 액션 모두 ``startCount`` 오프셋이 아니라 1부터 시작하는 ``pageIndex`` 를 쓴다
+    (국세법령정보시스템 공통 규칙 — 실측).
+    """
+    if doc_class not in SPECIAL_CLASSES:
+        raise NtsError(
+            ErrorCode.INVALID_INPUT,
+            f"special 검색 대상이 아닌 문서구분입니다: {doc_class}",
+            hints=[f"지원 문서구분: {', '.join(SPECIAL_CLASSES)}"],
+        )
+
+    page = max(1, page)
+    limit = min(100, max(1, limit))
+    action_id = _SEARCH_ACTION[doc_class]
+
+    payload = await call_action(
+        action_id,
+        _params(
+            doc_class,
+            query=query,
+            tax_type_codes=tax_type_codes,
+            issue_codes=issue_codes,
+            date_from=date_from,
+            date_to=date_to,
+            page=page,
+            limit=limit,
+        ),
+        referer=SOURCE_PAGE[doc_class],
+        ttl=TTL.SEARCH,
+    )
+
+    rows = (payload or {}).get(_ROW_LIST_KEY[doc_class]) or []
+    level = str(authority_for_doc_class(doc_class))
+    items = [_row_to_item(doc_class, row, level) for row in rows]
+
+    out: dict[str, Any] = {
+        "docClass": doc_class,
+        "documentType": _label(doc_class),
+        "authorityLevel": level,
+        "sourcePage": SOURCE_PAGE[doc_class],
+        "total": int((payload or {}).get("recordCount") or 0),
+        "page": page,
+        "limit": limit,
+        "items": items,
+    }
+    if doc_class == AUDIT_APPEAL:
+        # 11 은 상세 액션이 없고 행별 딥링크도 없다. 본문 확보 경로를 명시한다.
+        out["bodyUnavailable"] = True
+        out["bodyNote"] = (
+            "감사원 심사청구는 사이트가 본문을 HTML 로 제공하지 않습니다. 본문은 행의 "
+            "attachment(첨부 PDF/HWP)에만 있고, 원본 스토리지에 파일이 없는 구간이 있습니다. "
+            "attachmentStatus=true 로 행별 확보 여부를 확인할 수 있습니다."
+        )
+    elif doc_class == TAXPAYER_PROTECTION:
+        out["note"] = "본문은 get_tax_document(ntst_dcm_id)로 조회합니다."
+    else:
+        out["note"] = (
+            "13 은 사전답변·질의회신을 쟁점별로 다시 묶은 목록입니다. 본문은 "
+            "get_tax_document(ntst_dcm_id)로 조회하며, 상세의 문서구분은 원래 구분(01·02 등)입니다."
+        )
+    return out
+
+
+def _row_to_item(doc_class: str, row: dict[str, Any], level: str) -> dict[str, Any]:
+    """검색 행 → 요약 항목. 세 액션의 필드 이름이 달라 분기한다."""
+    if doc_class == AUDIT_APPEAL:
+        fle_id = str(row.get("fleId") or "").strip()
+        fle_sn = row.get("fleSn")
+        item: dict[str, Any] = {
+            "documentType": _label(doc_class),
+            "documentNumber": str(row.get("ntstDcmDscmCntn") or "").strip() or None,
+            "title": str(row.get("ntstDcmTtl") or "").strip() or None,
+            "taxType": str(row.get("ntstTlawNm") or "").strip() or None,
+            "decisionResult": str(row.get("ntstDcmDcsNm") or "").strip() or None,
+            # 사이트 목록의 이 열은 결정일이다(rgtDt). 다른 검색 도구와 키를 맞추려고
+            # registrationDate 를 쓰되, 의미가 다르므로 주석으로 남긴다.
+            "registrationDate": format_date(row.get("rgtDt")),
+            "summary": str(row.get("ntstDcmGistCntn") or "").strip() or None,
+            "authorityLevel": level,
+            "attachment": drop_empty(
+                {
+                    "fleId": fle_id or None,
+                    "fleSn": fle_sn,
+                    "downloadUrl": attachment_url(fle_id, fle_sn) if fle_id and fle_sn else None,
+                }
+            ),
+        }
+        return drop_empty(item)
+
+    if doc_class == CURATED_ISSUE:
+        return drop_empty(
+            {
+                "documentType": _label(doc_class),
+                "documentNumber": str(row.get("ntstDcmDscmCntn") or "").strip() or None,
+                "title": str(row.get("ntstDcmTtl") or "").strip() or None,
+                "taxType": str(row.get("ntstTlawClNm") or "").strip() or None,
+                "summary": str(row.get("ntstDcmGistCntn") or "").strip() or None,
+                # 쟁점 분류는 코드표(19396)를 상수로 고정하지 않고 원본 이름을 그대로 쓴다 —
+                # 표를 검증하지 못한 상태에서 코드를 지어내면 없는 분류를 만들어낸다.
+                "issueCategory": str(row.get("ntstDcmPntClNm") or "").strip() or None,
+                "issueCategoryCode": str(row.get("ntstDcmPntClCd") or "").strip() or None,
+                "originalDocClass": str(row.get("ntstDcmClNm") or "").strip() or None,
+                "authorityLevel": level,
+                "ntstDcmId": str(row.get("ntstDcmId") or "").strip() or None,
+            }
+        )
+
+    return drop_empty(
+        {
+            "documentType": _label(doc_class),
+            "title": str(row.get("ntstDcmTtl") or "").strip() or None,
+            "taxType": str(row.get("ntstTLawClNm") or "").strip() or None,
+            "registrationDate": format_date(row.get("frsRgtDtm") or row.get("ntstDcmRgtDt")),
+            "author": str(row.get("fnm") or "").strip() or None,
+            "summary": str(row.get("ntstDcmGistCntn") or "").strip() or None,
+            "documentNumber": str(row.get("ntstDcmDscmCntn") or "").strip() or None,
+            "authorityLevel": level,
+            "ntstDcmId": str(row.get("ntstDcmId") or "").strip() or None,
+        }
+    )
+
+
+async def get_attachment_info(
+    fle_id: str, fle_sn: str, *, verify: bool = True
+) -> dict[str, Any]:
+    """첨부 1건의 메타데이터와 (선택) 실제 확보 가능 여부.
+
+    ``verify=True`` 이면 다운로드를 **가볍게** 확인한다. 본문을 저장하지 않고 판정만
+    하며, 실패하면 그대로 이유를 남긴다 — 서버 오류 페이지를 파일로 저장하지 않는다.
+    """
+    fid = str(fle_id or "").strip()
+    fsn = str(fle_sn or "").strip()
+    if not fid or not fsn:
+        raise NtsError(ErrorCode.INVALID_INPUT, "fle_id 와 fle_sn 이 모두 필요합니다.")
+
+    referer = SOURCE_PAGE[AUDIT_APPEAL]
+    raw = await call_action(
+        FILE_INFO_ACTION, {"fleId": fid, "fleSn": fsn}, referer=referer, ttl=TTL.STATIC
+    )
+    row = raw[0] if isinstance(raw, list) and raw else None
+    if not row:
+        raise not_found(
+            f"fleId {fid} / fleSn {fsn} 에 해당하는 첨부 파일 정보를 찾지 못했습니다.",
+            ["목록 행의 attachment.fleId·fleSn 값을 그대로 쓰세요."],
+        )
+
+    base = str(row.get("orcFleNm") or "").strip()
+    extension = str(row.get("fleXsnNm") or "").strip()
+    url = attachment_url(fid, fsn)
+    info: dict[str, Any] = {
+        "fileName": f"{base}.{extension}" if base and extension else (base or None),
+        "format": extension or None,
+        "sizeBytes": row.get("fleSz") or None,
+        "storageBatch": row.get("flePth") or None,
+        "downloadUrl": url,
+    }
+
+    if verify:
+        available, reason = await probe_attachment(url, referer=referer)
+        info["available"] = available
+        if not available:
+            info["unavailableReason"] = reason or ATTACHMENT_STORAGE_GAP_NOTE
+    return drop_empty(info)
+
+
+async def probe_attachment(url: str, *, referer: str | None = None) -> tuple[bool, str | None]:
+    """첨부가 실제로 내려오는지 확인한다. ``(확보가능, 불가사유)``.
+
+    ``HEAD`` 로 크기만 보고(본문을 받지 않는다), 작은 ``application/octet-stream`` 일
+    때만 본문을 받아 오류 페이지인지 확인한다. 실측: 정상 파일은 content-length 가
+    실제 파일 크기(수십~수백 KB)이고, 파일이 없으면 1,992바이트 HTML 이 온다.
+    """
+    verdict = upstream_limiter.take(1)
+    if not verdict.ok:
+        raise NtsError(
+            ErrorCode.RATE_LIMITED,
+            f"요청 한도 초과: {verdict.retry_after_sec}초 후 재시도하세요.",
+            detail={"retryAfterSec": verdict.retry_after_sec},
+        )
+
+    client = await get_client()
+    headers = {"referer": referer or SOURCE_PAGE[AUDIT_APPEAL]}
+    try:
+        head = await client.head(url, headers=headers)
+    except httpx.HTTPError as exc:
+        raise upstream(f"첨부 확인 요청 실패: {exc}", url=url) from exc
+
+    if head.status_code >= 400:
+        return False, f"원본이 HTTP {head.status_code} 로 응답했습니다(원문 파일 미제공)."
+
+    content_type = str(head.headers.get("content-type") or "")
+    try:
+        length = int(head.headers.get("content-length") or 0)
+    except ValueError:
+        length = 0
+
+    if not content_type.startswith("application/octet-stream") or length > _ERROR_PAGE_MAX_BYTES:
+        return True, None
+
+    # 작은 octet-stream 은 오류 페이지일 수 있다 — 본문 앞부분을 받아 확인한다.
+    try:
+        response = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        raise upstream(f"첨부 확인 요청 실패: {exc}", url=url) from exc
+
+    body = response.content
+    if _is_error_page(body):
+        return False, ATTACHMENT_STORAGE_GAP_NOTE
+    return True, None
+
+
+def _is_error_page(body: bytes) -> bool:
+    """오류 페이지 판정.
+
+    서버는 Content-Disposition 을 정상으로 붙이면서 본문만 자기 404 HTML 로 바꾼다.
+    그래서 확장자가 아니라 **본문 선두**를 본다(대소문자·선행 개행 무시).
+    """
+    head = body[:64].lstrip().lower()
+    return head.startswith(b"<!doctype") or head.startswith(b"<html")
+
+
+async def attachment_status(fle_id: str, fle_sn: str) -> dict[str, Any]:
+    """검색 행에 붙일 첨부 확보 상태.
+
+    선택적 부가 정보라서 실패해도 검색 자체는 살린다. 다만 오류를 조용히 삼키지 않고
+    ``statusError`` 로 그대로 싣는다 — 조회 실패를 "파일 없음"으로 바꾸지 않는다.
+    """
+    try:
+        info = await get_attachment_info(fle_id, fle_sn, verify=True)
+    except NtsError as exc:
+        return {"available": None, "statusError": str(exc.code), "statusMessage": exc.message}
+    except Exception as exc:  # noqa: BLE001 — 부가 정보 실패가 검색을 죽이면 안 된다
+        return {"available": None, "statusError": "UPSTREAM_ERROR", "statusMessage": str(exc)}
+    return info
