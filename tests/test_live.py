@@ -101,6 +101,43 @@ async def test_partial_number_is_never_answered_as_exact() -> None:
     assert detail["similarDocuments"], "유사문서가 있어야 한다(사이트가 부분일치를 준다)"
 
 
+async def test_duplicate_document_number_requires_context() -> None:
+    """구형 문서번호는 연도 없이 재사용돼 번호만으로 한 건을 확정할 수 없다."""
+    label, data = await call(
+        "lookup_tax_document",
+        {"document_number": "법인46012-1784", "include_full_text": False},
+    )
+    assert label == "AMBIGUOUS_DOCUMENT_NUMBER", data
+    candidates = data["error"]["detail"]["candidates"]
+    assert {item["ntstDcmId"] for item in candidates} == {
+        "010000000000091224",
+        "010000000000062896",
+    }
+
+    label, data = await call(
+        "lookup_tax_document",
+        {
+            "document_number": "법인46012-1784",
+            "context_query": "퇴직금",
+            "include_full_text": False,
+        },
+    )
+    assert label == "OK", data
+    assert data["resolvedBy"] == "document_number_and_context"
+    assert data["candidateCount"] == 2
+    assert data["document"]["ntstDcmId"] == "010000000000062896"
+
+
+async def test_duplicate_document_number_via_unified_search() -> None:
+    label, data = await call("search_taxlaw", {"query": "법인46012-1784"})
+    assert label == "AMBIGUOUS_DOCUMENT_NUMBER", data
+    assert data["error"]["detail"]["candidateCount"] == 2
+    label, data = await call("search_taxlaw", {"query": "법인46012-1784 퇴직금"})
+    assert label == "OK", data
+    assert data["resolvedBy"] == "document_number_and_context"
+    assert data["document"]["ntstDcmId"] == "010000000000062896"
+
+
 async def test_required_keyword_searches() -> None:
     for query in ["법규재산", "상속 공동상속주택"]:
         label, data = await call("search_tax_interpretations", {"query": query, "limit": 5})
@@ -412,3 +449,66 @@ async def test_local_tools_via_mcp_client() -> None:
     assert data["error"]["detail"]["exactMatch"] is False
     assert data["error"]["detail"]["similarDocuments"]
     assert "추측" in data["guardrail"]
+
+
+# Special document types have separate source actions and must work through MCP.
+@pytest.mark.parametrize("query,domain,doc_class", [
+    ("감사원 심사청구 법인세", "decision", "11"),
+    ("자주 찾는 쟁점별 사례 상속", "interpretation", "13"),
+    ("납세자 보호 위원회 심의 사례 세무조사", "decision", "14"),
+])
+async def test_special_live_unified_search(query, domain, doc_class):
+    label, result = await call("search_taxlaw", {"query": query, "limit_per_domain": 2})
+    assert label == "OK", result
+    source = result["results"][domain]
+    assert source["docClass"] == doc_class
+    assert 0 < len(source["items"]) <= 2
+
+
+@pytest.mark.parametrize("tool,kind,query", [
+    ("search_tax_interpretations", "curated_issue", "상속"),
+    ("search_tax_decisions", "taxpayer_protection", "세무조사"),
+])
+async def test_special_live_search_to_body(tool, kind, query):
+    label, result = await call(tool, {"type": kind, "query": query, "limit": 2})
+    assert label == "OK", result
+    assert 0 < len(result["items"]) <= 2
+    document_id = result["items"][0]["ntstDcmId"]
+    label, detail = await call("get_tax_document", {
+        "ntst_dcm_id": document_id, "detail": "full", "body_limit": 5000,
+    })
+    assert label == "OK", detail
+    assert detail["document"]["ntstDcmId"] == document_id
+    body_fields = ("fullText", "facts", "question", "answer", "reasoning",
+                   "conclusion", "claimantView", "agencyView", "preamble")
+    assert any(detail["document"].get(field) for field in body_fields)
+
+
+async def test_special_live_audit_attachment():
+    label, result = await call("search_tax_decisions", {
+        "type": "audit_appeal", "query": "2024심사636",
+        "attachment_status": True, "limit": 1,
+    })
+    assert label == "OK", result
+    assert len(result["items"]) == 1
+    assert result["items"][0]["documentNumber"] == "2024심사636"
+    attachment = result["items"][0]["attachment"]
+    assert attachment.get("available") is True, attachment
+    assert attachment["availabilityCheck"] == "file_signature_prefix_only"
+
+
+@pytest.mark.parametrize("tool,kind,query", [
+    ("search_tax_interpretations", "curated_issue", "상속"),
+    ("search_tax_decisions", "audit_appeal", "법인세"),
+    ("search_tax_decisions", "taxpayer_protection", "세무조사"),
+])
+async def test_special_live_pages_do_not_repeat(tool, kind, query):
+    pages = []
+    for page in (1, 2):
+        label, result = await call(tool, {
+            "type": kind, "query": query, "page": page, "limit": 2,
+        })
+        assert label == "OK", result
+        assert 0 < len(result["items"]) <= 2
+        pages.append({item.get("ntstDcmId") or item["documentNumber"] for item in result["items"]})
+    assert pages[0].isdisjoint(pages[1]), (kind, pages)

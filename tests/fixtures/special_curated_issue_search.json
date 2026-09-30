@@ -1,0 +1,32 @@
+{
+  "pageIndex": 1,
+  "recordCountPerPage": 3,
+  "recordCount": 1084,
+  "pntThanBkmrDVOList": [
+    {
+      "ntstDcmId": "010000000000505039",
+      "ntstDcmDscmCntn": "사전-2017-법령해석소득-0894",
+      "ntstDcmClCd": "01",
+      "ntstDcmClNm": "사전",
+      "ntstTlawClCd": "305",
+      "ntstTlawClNm": "종합소득세",
+      "ntstDcmTtl": "재외공관 근무 해외무관 및 해외 개인단위 파견인원에게 지급하는 재외근무수당의 비과세 여부",
+      "ntstDcmGistCntn": "재외공관에 주재하는 무관 및 해외 개인단위 파견인원이「공무원 수당 등에 관한 규정」제14조 및 별표 11에 따라 지급받는 재외근무수당에 75%를 곱한 금액은「소득세법 시행령」제16조제1항제2호 및 외교부 고시 제2017-2호에 따라 비과세되는 것임",
+      "ntstDcmPntClCd": "304001",
+      "ntstDcmPntClNm": "국외근로자의 비과세급여"
+    },
+    {
+      "ntstDcmId": "010000000000574850",
+      "ntstDcmDscmCntn": "사전-2023-법규재산-0247",
+      "ntstDcmClCd": "01",
+      "ntstDcmClNm": "사전",
+      "ntstTlawClCd": "308",
+      "ntstTlawClNm": "상속증여세",
+      "ntstDcmTtl": "「주택법」상 지역주택조합의 조합원입주권이 동거주택상속공제 대상인지 여부",
+      "ntstDcmGistCntn": "주택법에 따른 지역주택조합의 조합원입주권은 상증법§23의2에 따른 동거주택 상속공제 적용대상에 해당하는 상속주택에 해당하지 아니함",
+      "ntstDcmPntClCd": "308004",
+      "ntstDcmPntClNm": "동거주택 상속공제"
+    }
+  ],
+  "ntstDcmClCd": ""
+}

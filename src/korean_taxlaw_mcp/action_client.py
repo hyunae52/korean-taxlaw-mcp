@@ -180,7 +180,18 @@ async def call_action(
     return await run()
 
 
+#: 상세 화면 경로. 문서구분에 따라 팝업이 다르고, 잘못 고르면 사용자가 빈 화면을 본다.
+_DETAIL_PATH: dict[str, str] = {
+    "question": "/qt/USEQTA002P.do",
+    "precedent": "/pd/USEPDA002P.do",
+    # 11 감사원 심사청구 — 행별 상세 화면이 없다(팝업이 목록을 다시 그린다).
+    "audit_appeal": "/pd/USEPDM001M.do",
+    # 14 납세자보호위원회 심의사례 전용 팝업
+    "taxpayer_protection": "/bg/USEBGF001P.do",
+}
+
+
 def detail_url(ntst_dcm_id: str, kind: str) -> str:
     """문서 상세 화면 URL — 출처 추적용. 사용자가 브라우저로 열 수 있는 주소다."""
-    path = "/qt/USEQTA002P.do" if kind == "question" else "/pd/USEPDA002P.do"
+    path = _DETAIL_PATH.get(kind, _DETAIL_PATH["question"])
     return f"{NTS_ORIGIN}{path}?ntstDcmId={ntst_dcm_id}"

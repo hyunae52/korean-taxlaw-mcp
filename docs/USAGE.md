@@ -35,12 +35,38 @@
 
 ```text
 정확히 일치        → found: true, exactMatch: true
+같은 번호가 여러 건 → AMBIGUOUS_DOCUMENT_NUMBER
 일치하는 문서 없음 → NOT_FOUND
 비슷한 문서        → similarDocuments에만 표시
 ```
 
 예를 들어 `법규재산-0119`처럼 일부만 입력하면 유사 문서를 안내할 수는 있지만 요청한 문서로
-단정하지 않습니다. 최종 응답의 문서번호는 원본 표기를 따릅니다.
+단정하지 않습니다. 구형 문서번호가 여러 문서에 재사용된 경우에는 `context_query`에 문서
+주제의 핵심어를 넣거나, 후보의 `ntstDcmId`를 `get_tax_document`에 전달해 대상을 지정합니다.
+최종 응답의 문서번호는 원본 표기를 따릅니다.
+
+`search_taxlaw`도 문서번호가 중복되면 같은 오류와 후보 목록을 반환합니다.
+`법인46012-1784 퇴직금`처럼 번호 뒤에 주제를 붙여 구분할 수 있습니다.
+유일성 확인은 다음 페이지까지 진행합니다. 검색어별 최대 10페이지(번호 검색 300건,
+문맥 검색 1,000건)를 넘으면 `LOOKUP_INCOMPLETE`로 알리며 정답이나 부존재를 확정하지 않습니다.
+이때는 검색 도구에서 후보를 확인한 뒤 `get_tax_document`에 `ntstDcmId`를 전달하세요.
+
+## 별도 자료 유형 검색
+
+- `search_tax_interpretations(type="curated_issue", query="상속")`: 자주찾는 쟁점별 사례
+- `search_tax_decisions(type="audit_appeal", query="2025심사2038")`: 감사원 심사청구
+- `search_tax_decisions(type="taxpayer_protection", query="세무조사")`: 납세자보호위원회 심의사례
+
+`search_taxlaw`에서도 `감사원 심사청구 법인세`, `납세자보호위원회 세무조사`,
+`쟁점별 사례 상속`처럼 자료 유형을 명시하면 해당 전용 검색을 사용합니다.
+여러 자료 유형을 함께 지정하면 결과를 유형별로 나누고 각 유형에 `limit_per_domain`을
+적용합니다. 특정 출처만 실패하면 나머지 결과와 `partialErrors`를 함께 반환합니다.
+유형을 명시하지 않은 통합검색과 기존 `type="all"`의 범위는 유지됩니다.
+
+쟁점별 사례는 일반 텍스트와 단일 세목, 감사원·납세자보호위원회는 일반 텍스트와 날짜를
+지원합니다. 지원하지 않는 필터와 잘못된 날짜는 `INVALID_INPUT`으로 반환합니다.
+감사원 본문은 첨부 파일로만 제공되며 `attachment_status=true`는 파일 앞부분의 서명만
+확인합니다. 전체 파일 검증이나 본문 추출을 의미하지 않습니다.
 
 ## 근거 유형
 
@@ -61,6 +87,8 @@
 | 오류 | 의미 |
 |---|---|
 | `NOT_FOUND` | 원본에 일치하는 자료가 없음 |
+| `AMBIGUOUS_DOCUMENT_NUMBER` | 같은 문서번호가 여러 건이라 하나를 확정할 수 없음 |
+| `LOOKUP_INCOMPLETE` | 후보 검색 한도에 도달해 문서번호의 유일성·부존재를 확정하지 못함 |
 | `DETAIL_NOT_AVAILABLE` | 문서는 있지만 원본에서 본문을 제공하지 않음 |
 | `UPSTREAM_ERROR` | 원본 사이트 오류·점검·비정상 응답 |
 | `RATE_LIMITED` | 요청 보호 한도 초과 또는 냉각 상태 |
