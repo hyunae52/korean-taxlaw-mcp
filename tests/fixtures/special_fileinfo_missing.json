@@ -1,0 +1,23 @@
+[
+  {
+    "mateStatClCd": "01",
+    "frsRgtDtm": null,
+    "frsRgtDataMaagClCd": null,
+    "frsRgtDataMaagUserId": null,
+    "frsRgtDataMaagPgmId": null,
+    "lstAltDtm": null,
+    "lstAltDataMaagClCd": null,
+    "lstAltDataMaagUserId": null,
+    "lstAltDataMaagPgmId": null,
+    "fleId": "300000000001219780",
+    "fleSn": 1015066,
+    "orcFleNm": "2025-심사-2038_공개문",
+    "orcFleId": null,
+    "flePth": "blrd/20260730",
+    "fleNm": "300000000001219780_1015066",
+    "fleSz": 488056,
+    "fleXsnNm": "pdf",
+    "fleDwldUri": "/downloadFile.do?fleId=300000000001219780&fleSn=1015066",
+    "prvYn": null
+  }
+]
