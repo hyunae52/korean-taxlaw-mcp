@@ -11,11 +11,13 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 from ..action_client import detail_url
 from ..codes import collection_for
 from ..config import DEFAULT_SIMILAR_LIMIT
+from ..errors import ErrorCode, NtsError, upstream
 from ..payload import slim
 from ..doc_number import is_same_doc_number, lookup_candidates, parse_doc_number
 from .documents import DECISION_CLASSES, INTERPRETATION_CLASSES, get_document, search_documents
@@ -38,6 +40,34 @@ def _domain_order(raw: str) -> list[str]:
 
 #: 유사문서는 '이런 별개 문서가 있다'는 신호만 주면 된다 — 식별 필드만 남긴다.
 _SIMILAR_KEYS = ("documentType", "documentNumber", "title", "registrationDate", "ntstDcmId")
+
+# 공개 원본에 한 조회가 무제한 요청을 보내지 않도록 검색어별 최대 10페이지를 확인한다.
+_MAX_SEARCH_PAGES = 10
+
+
+async def _search_pages(domain: str, query: str, limit: int) -> AsyncIterator[dict[str, Any]]:
+    """유일성 판정에 쓰는 검색은 마지막 페이지까지 확인해야 한다."""
+    seen: set[str] = set()
+    for page in range(1, _MAX_SEARCH_PAGES + 1):
+        result = await search_documents(
+            doc_classes=_CLASSES[domain], query=query, match="all",
+            limit=limit, sort="relevance", page=page,
+        )
+        items = result["items"]
+        ids = {item["ntstDcmId"] for item in items if item.get("ntstDcmId")}
+        if result["total"] > (page - 1) * limit and (not ids or (page > 1 and ids <= seen)):
+            raise upstream("문서번호 검색의 다음 페이지가 비어 있거나 반복되어 후보를 확인하지 못했습니다.",
+                           query=query, page=page)
+        seen.update(ids)
+        yield result
+        if page * limit >= result["total"]:
+            return
+    raise NtsError(
+        ErrorCode.LOOKUP_INCOMPLETE,
+        "문서번호 검색 결과가 조회 한도를 넘어 전체 후보를 확인하지 못했습니다.",
+        hints=["search_tax_interpretations 또는 search_tax_decisions로 검색한 뒤 ntstDcmId를 지정하세요."],
+        detail={"query": query, "pagesChecked": _MAX_SEARCH_PAGES, "total": result["total"]},
+    )
 
 
 async def lookup_by_document_number(
@@ -72,29 +102,18 @@ async def lookup_by_document_number(
             tried.append(f"{domain}:{candidate}")
             # 후보 하나라도 조회에 실패하면 부존재를 확정할 수 없다. 장애를 삼키고
             # NOT_FOUND 로 내리면 실재하는 문서를 없다고 답하게 되므로 그대로 전파한다.
-            result = await search_documents(
-                doc_classes=_CLASSES[domain],
-                query=candidate,
-                match="all",
-                limit=30,
-                sort="relevance",
-            )
+            async for result in _search_pages(domain, candidate, limit=30):
+                for item in result["items"]:
+                    number = item.get("documentNumber", "")
+                    if not item.get("ntstDcmId"):
+                        continue
+                    if is_same_doc_number(number, parsed.canonical) or is_same_doc_number(number, raw):
+                        exact.setdefault(item["ntstDcmId"], (domain, item))
+                        domain_has_exact = True
+                    elif number:
+                        similar.setdefault(item["ntstDcmId"], item)
 
-            for item in result["items"]:
-                number = item.get("documentNumber", "")
-                # DOC_ID 가 빈 행은 요약 단계에서 키가 걸러진다 — 상세 조회도
-                # 유사문서 수집도 불가능하므로 건너뛴다.
-                if not item.get("ntstDcmId"):
-                    continue
-                if is_same_doc_number(number, parsed.canonical) or is_same_doc_number(number, raw):
-                    exact.setdefault(item["ntstDcmId"], (domain, item))
-                    domain_has_exact = True
-                    continue
-                if number:
-                    similar.setdefault(item["ntstDcmId"], item)
-
-            # 한 검색 응답에 같은 번호의 모든 문서가 함께 온다. 표기 변형을 더
-            # 조회하면 같은 후보만 반복되므로 이 영역의 후보 검색을 끝낸다.
+            # 해당 검색어의 모든 페이지를 확인한 뒤 표기 변형 검색을 끝낸다.
             if domain_has_exact:
                 break
 
@@ -109,20 +128,16 @@ async def lookup_by_document_number(
     if len(exact) > 1 and context_query and context_query.strip():
         narrowed: set[str] = set()
         for domain in {domain for domain, _item in exact.values()}:
-            result = await search_documents(
-                doc_classes=_CLASSES[domain],
-                query=f"{parsed.canonical} {context_query.strip()}",
-                match="all",
-                limit=100,
-                sort="relevance",
-            )
-            for item in result["items"]:
-                doc_id = item.get("ntstDcmId")
-                if doc_id in exact and (
-                    is_same_doc_number(item.get("documentNumber", ""), parsed.canonical)
-                    or is_same_doc_number(item.get("documentNumber", ""), raw)
-                ):
-                    narrowed.add(doc_id)
+            async for result in _search_pages(
+                domain, f"{parsed.canonical} {context_query.strip()}", limit=100
+            ):
+                for item in result["items"]:
+                    doc_id = item.get("ntstDcmId")
+                    if doc_id in exact and (
+                        is_same_doc_number(item.get("documentNumber", ""), parsed.canonical)
+                        or is_same_doc_number(item.get("documentNumber", ""), raw)
+                    ):
+                        narrowed.add(doc_id)
         if len(narrowed) == 1:
             selected_id = next(iter(narrowed))
             resolved_by_context = True

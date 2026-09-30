@@ -18,9 +18,10 @@ silently substitute `zisu17/main` or an unreviewed branch.
 
 ## Limits
 
-- Candidate counts cover the bounded provider response inspected by the tool;
-  they are not a representation that every historical provider page was
-  enumerated.
+- Document-number lookup checks up to 10 pages per search term. Reaching that
+  limit returns `LOOKUP_INCOMPLETE`; broken or repeated pages return an upstream
+  error. Neither result certifies uniqueness or absence. A completed search
+  still does not certify that the source indexes every historical document.
 - Candidate `registrationDate` is not renamed to production date. A selected
   detail response can separately contain `productionDate`.
 - Provider availability, undocumented response shapes, and source-site changes

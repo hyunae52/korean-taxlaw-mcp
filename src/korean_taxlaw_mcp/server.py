@@ -198,6 +198,26 @@ def _merge_law(query: str | None, law: str | None, article: str | None) -> str |
     return " ".join(parts) if parts else None
 
 
+def _ambiguous_document_number(document_number: str, outcome: dict[str, Any]) -> NtsError:
+    """두 진입점이 같은 후보 목록과 오류 계약을 전달한다."""
+    return NtsError(
+        ErrorCode.AMBIGUOUS_DOCUMENT_NUMBER,
+        f"문서번호 '{document_number}' 와 정확히 일치하는 문서가 여러 건입니다.",
+        hints=[
+            "lookup_tax_document의 context_query에 문서 주제의 핵심어를 넣어 다시 조회하세요.",
+            "후보의 ntstDcmId를 get_tax_document에 주면 문서를 직접 지정할 수 있습니다.",
+        ],
+        detail={
+            "normalizedDocumentNumber": outcome["normalizedDocumentNumber"],
+            "exactMatch": False,
+            "candidateCount": outcome["candidateCount"],
+            "candidates": outcome["candidates"],
+            "triedQueries": outcome["triedQueries"],
+            "searchedDomains": outcome["searchedDomains"],
+        },
+    )
+
+
 def _check_special_search_filters(*, match: str, exclude: list[str] | None,
                                   sort: str | None, law: str | None = None,
                                   article: str | None = None) -> None:
@@ -319,22 +339,7 @@ async def lookup_tax_document(
         return _ok(outcome)
 
     if outcome.get("ambiguous"):
-        raise NtsError(
-            ErrorCode.AMBIGUOUS_DOCUMENT_NUMBER,
-            f"문서번호 '{document_number}' 와 정확히 일치하는 문서가 여러 건입니다.",
-            hints=[
-                "context_query에 문서 주제의 핵심어를 넣어 다시 조회하세요.",
-                "후보의 ntstDcmId를 get_tax_document에 주면 문서를 직접 지정할 수 있습니다.",
-            ],
-            detail={
-                "normalizedDocumentNumber": outcome["normalizedDocumentNumber"],
-                "exactMatch": False,
-                "candidateCount": outcome["candidateCount"],
-                "candidates": outcome["candidates"],
-                "triedQueries": outcome["triedQueries"],
-                "searchedDomains": outcome["searchedDomains"],
-            },
-        )
+        raise _ambiguous_document_number(document_number, outcome)
 
     raise NtsError(
         ErrorCode.NOT_FOUND,
@@ -750,7 +755,9 @@ async def search_tax_forms(
         "국세청 자료 전 영역을 한 번에 검색한다(해석례·결정례·고시훈령·서식). "
         "질의에 문서번호가 섞여 있으면 exact lookup 을 최우선으로 시도한다. "
         "domains 를 생략하면 질의 표현('예규', '심판', '통칙', '적부' 등)을 보고 조회 영역을 "
-        "자동 결정한다. 어느 영역을 봐야 할지 모를 때의 진입점으로 쓸 것."
+        "자동 결정한다. 감사원 심사청구·납세자보호위원회·쟁점별 사례를 명시하면 전용 검색을 쓴다. "
+        "중복 문서번호는 AMBIGUOUS_DOCUMENT_NUMBER를 반환한다. "
+        "어느 영역을 봐야 할지 모를 때의 진입점으로 쓸 것."
     ),
 )
 @_envelope_errors
@@ -761,7 +768,7 @@ async def search_taxlaw(
         Field(description="조회할 영역. 생략하면 자동 결정."),
     ] = None,
     tax_type: Annotated[str | list[str] | None, Field(description="세목(명시하면 필터로 적용)")] = None,
-    limit_per_domain: Annotated[int, Field(ge=1, le=50, description="영역별 결과 수")] = 5,
+    limit_per_domain: Annotated[int, Field(ge=1, le=50, description="영역 내 자료유형별 결과 수")] = 5,
 ) -> str:
     hint = route_query(query)
     targets = list(domains) if domains else (hint.domains or ["interpretation", "decision"])
@@ -780,29 +787,65 @@ async def search_taxlaw(
         )
         if outcome["found"]:
             return _ok({
-                "resolvedBy": "documentNumber",
+                "resolvedBy": outcome.get("resolvedBy", "documentNumber"),
+                **({"candidateCount": outcome["candidateCount"]} if "candidateCount" in outcome else {}),
                 "exactMatch": True,
                 "document": outcome["document"],
                 "note": "본문은 get_tax_document(ntst_dcm_id)로 조회하세요.",
             })
+        if outcome.get("ambiguous"):
+            raise _ambiguous_document_number(hint.document_number or query.strip(), outcome)
+
+    special_types = {
+        "interpretation": _SPECIAL_INTERPRETATION_TYPE_CODE,
+        "decision": _SPECIAL_DECISION_TYPE_CODE,
+    }
+    requested_special = {
+        code for domain in targets for code in special_types.get(domain, {}).values()
+        if code in hint.doc_classes
+    }
+    # 입력 오류는 부분적인 원본 장애로 감싸거나 필터 없이 재조회하지 않는다.
+    if tax_type and requested_special & {AUDIT_APPEAL, TAXPAYER_PROTECTION}:
+        raise NtsError(ErrorCode.INVALID_INPUT, "감사원·납세자보호위원회 검색은 세목 필터를 지원하지 않습니다.")
+    if CURATED_ISSUE in requested_special:
+        if len(codes) > 1:
+            raise NtsError(ErrorCode.INVALID_INPUT, "자주찾는 쟁점별 사례는 한 번에 세목 하나만 검색할 수 있습니다.")
+        if not hint.content_query and not codes:
+            raise NtsError(ErrorCode.INVALID_INPUT, "쟁점별 사례 검색에는 내용 키워드 또는 세목이 필요합니다.")
 
     results: dict[str, Any] = {}
     errors: dict[str, str] = {}
 
     async def one(domain: str) -> None:
         try:
-            if domain == "interpretation":
-                classes = [c for c in hint.doc_classes if c in INTERPRETATION_CLASSES] or list(INTERPRETATION_CLASSES)
-                results["interpretation"] = await search_documents(
-                    doc_classes=classes, query=search_query, tax_type_codes=codes,
-                    limit=limit_per_domain, sort="relevance",
-                )
-            elif domain == "decision":
-                classes = [c for c in hint.doc_classes if c in DECISION_CLASSES] or list(DECISION_CLASSES)
-                results["decision"] = await search_documents(
-                    doc_classes=classes, query=search_query, tax_type_codes=codes,
-                    limit=limit_per_domain, sort="relevance",
-                )
+            if domain in special_types:
+                standard_classes = INTERPRETATION_CLASSES if domain == "interpretation" else DECISION_CLASSES
+                classes = [c for c in hint.doc_classes if c in standard_classes]
+                special = {name: code for name, code in special_types[domain].items()
+                           if code in hint.doc_classes}
+                if not classes and not special:
+                    classes = list(standard_classes)
+                searches = {}
+                if classes:
+                    searches["standard"] = search_documents(
+                        doc_classes=classes, query=search_query, tax_type_codes=codes,
+                        limit=limit_per_domain, sort="relevance",
+                    )
+                for name, code in special.items():
+                    searches[name] = search_special_documents(
+                        doc_class=code, query=hint.content_query or None,
+                        tax_type_codes=codes, limit=limit_per_domain,
+                    )
+                found = await asyncio.gather(*searches.values(), return_exceptions=True)
+                successful = {}
+                for name, result in zip(searches, found, strict=True):
+                    if isinstance(result, BaseException):
+                        errors[f"{domain}.{name}"] = str(result)
+                    else:
+                        successful[name] = result
+                # 서로 다른 출처의 링크·본문 제공 여부를 섞지 않는다.
+                if successful:
+                    results[domain] = next(iter(successful.values())) if len(searches) == 1 else successful
             elif domain == "guidance":
                 # 통칙·집행기준은 법령명이 필요하므로 통합검색에서는 고시·훈령만 훑는다.
                 notice, directive = await asyncio.gather(
