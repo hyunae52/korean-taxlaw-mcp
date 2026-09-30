@@ -35,12 +35,15 @@
 
 ```text
 정확히 일치        → found: true, exactMatch: true
+같은 번호가 여러 건 → AMBIGUOUS_DOCUMENT_NUMBER
 일치하는 문서 없음 → NOT_FOUND
 비슷한 문서        → similarDocuments에만 표시
 ```
 
 예를 들어 `법규재산-0119`처럼 일부만 입력하면 유사 문서를 안내할 수는 있지만 요청한 문서로
-단정하지 않습니다. 최종 응답의 문서번호는 원본 표기를 따릅니다.
+단정하지 않습니다. 구형 문서번호가 여러 문서에 재사용된 경우에는 `context_query`에 문서
+주제의 핵심어를 넣거나, 후보의 `ntstDcmId`를 `get_tax_document`에 전달해 대상을 지정합니다.
+최종 응답의 문서번호는 원본 표기를 따릅니다.
 
 ## 근거 유형
 
@@ -61,6 +64,7 @@
 | 오류 | 의미 |
 |---|---|
 | `NOT_FOUND` | 원본에 일치하는 자료가 없음 |
+| `AMBIGUOUS_DOCUMENT_NUMBER` | 같은 문서번호가 여러 건이라 하나를 확정할 수 없음 |
 | `DETAIL_NOT_AVAILABLE` | 문서는 있지만 원본에서 본문을 제공하지 않음 |
 | `UPSTREAM_ERROR` | 원본 사이트 오류·점검·비정상 응답 |
 | `RATE_LIMITED` | 요청 보호 한도 초과 또는 냉각 상태 |

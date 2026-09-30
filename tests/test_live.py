@@ -101,6 +101,33 @@ async def test_partial_number_is_never_answered_as_exact() -> None:
     assert detail["similarDocuments"], "유사문서가 있어야 한다(사이트가 부분일치를 준다)"
 
 
+async def test_duplicate_document_number_requires_context() -> None:
+    """구형 문서번호는 연도 없이 재사용돼 번호만으로 한 건을 확정할 수 없다."""
+    label, data = await call(
+        "lookup_tax_document",
+        {"document_number": "법인46012-1784", "include_full_text": False},
+    )
+    assert label == "AMBIGUOUS_DOCUMENT_NUMBER", data
+    candidates = data["error"]["detail"]["candidates"]
+    assert {item["ntstDcmId"] for item in candidates} == {
+        "010000000000091224",
+        "010000000000062896",
+    }
+
+    label, data = await call(
+        "lookup_tax_document",
+        {
+            "document_number": "법인46012-1784",
+            "context_query": "퇴직금",
+            "include_full_text": False,
+        },
+    )
+    assert label == "OK", data
+    assert data["resolvedBy"] == "document_number_and_context"
+    assert data["candidateCount"] == 2
+    assert data["document"]["ntstDcmId"] == "010000000000062896"
+
+
 async def test_required_keyword_searches() -> None:
     for query in ["법규재산", "상속 공동상속주택"]:
         label, data = await call("search_tax_interpretations", {"query": query, "limit": 5})
