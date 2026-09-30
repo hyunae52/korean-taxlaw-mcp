@@ -4,9 +4,9 @@ This fork keeps reviewed TaxLab-specific fixes while following
 `zisu17/korean-taxlaw-mcp:main`.
 
 TaxLab production and public installation instructions use this fork, not a
-moving upstream branch. The package version `2.0.0.post1` identifies the first
-downstream release based on upstream `v2.0.0`; the release tag is
-`taxlab-v2.0.0.post1`. Future upstream releases receive a new reviewed
+moving upstream branch. The package version `2.1.0.post1` identifies the reviewed
+downstream release based on upstream `v2.1.0`; the release tag is
+`taxlab-v2.1.0.post1`. Future upstream releases receive a new reviewed
 downstream version and tag before activation.
 
 The scheduled `Upstream sync candidate` workflow checks upstream daily. When
@@ -24,3 +24,17 @@ If an equivalent downstream fix is accepted upstream, retain the regression
 test, remove only the redundant patch after comparison, and publish a new
 downstream release. Upstream activity is helpful but is not an availability or
 support commitment for TaxLab.
+
+## v2.1.0 synchronization (2026-10-01)
+
+Upstream commit `a91872fed2c12cd51fffdc4c2dbbfcabe997262b` includes our
+document-number and special-source contributions, plus pagination, unified
+search routing, date validation, and response-consistency fixes. All upstream
+implementation and tests are retained; the only runtime source difference is
+the downstream version. The dependency lock changes only the project version.
+
+Keep the fork's scheduled candidate workflow, security and data notices, and
+fork installation URLs. Merge this synchronization with a merge commit so
+upstream remains an ancestor and the daily check does not rediscover the same
+release. A conflict in a future upstream merge stops candidate preparation;
+it requires a reviewed resolution, not an automatic overwrite.

@@ -128,6 +128,16 @@ async def test_duplicate_document_number_requires_context() -> None:
     assert data["document"]["ntstDcmId"] == "010000000000062896"
 
 
+async def test_duplicate_document_number_via_unified_search() -> None:
+    label, data = await call("search_taxlaw", {"query": "법인46012-1784"})
+    assert label == "AMBIGUOUS_DOCUMENT_NUMBER", data
+    assert data["error"]["detail"]["candidateCount"] == 2
+    label, data = await call("search_taxlaw", {"query": "법인46012-1784 퇴직금"})
+    assert label == "OK", data
+    assert data["resolvedBy"] == "document_number_and_context"
+    assert data["document"]["ntstDcmId"] == "010000000000062896"
+
+
 async def test_required_keyword_searches() -> None:
     for query in ["법규재산", "상속 공동상속주택"]:
         label, data = await call("search_tax_interpretations", {"query": query, "limit": 5})
@@ -442,6 +452,19 @@ async def test_local_tools_via_mcp_client() -> None:
 
 
 # Special document types have separate source actions and must work through MCP.
+@pytest.mark.parametrize("query,domain,doc_class", [
+    ("감사원 심사청구 법인세", "decision", "11"),
+    ("자주 찾는 쟁점별 사례 상속", "interpretation", "13"),
+    ("납세자 보호 위원회 심의 사례 세무조사", "decision", "14"),
+])
+async def test_special_live_unified_search(query, domain, doc_class):
+    label, result = await call("search_taxlaw", {"query": query, "limit_per_domain": 2})
+    assert label == "OK", result
+    source = result["results"][domain]
+    assert source["docClass"] == doc_class
+    assert 0 < len(source["items"]) <= 2
+
+
 @pytest.mark.parametrize("tool,kind,query", [
     ("search_tax_interpretations", "curated_issue", "상속"),
     ("search_tax_decisions", "taxpayer_protection", "세무조사"),

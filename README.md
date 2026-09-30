@@ -1,8 +1,8 @@
 # korean-taxlaw-mcp
 
-> **TaxLab downstream limited beta (`2.0.0.post1`):** 이 저장소는
+> **TaxLab downstream limited beta (`2.1.0.post1`):** 이 저장소는
 > [`zisu17/korean-taxlaw-mcp`](https://github.com/zisu17/korean-taxlaw-mcp)
-> `v2.0.0`을 기준으로 검토한 Hyunae 운영 포크입니다. 운영은 이 포크의 고정 커밋을
+> `v2.1.0`을 기준으로 검토한 Hyunae 운영 포크입니다. 운영은 이 포크의 고정 커밋을
 > 사용하고 원본 변경은 매일 후보로만 확인합니다. 자동 병합·배포하지 않습니다.
 > 신고·불복 등 실제 업무의 단독 근거로 사용하지 마세요.
 
@@ -39,6 +39,11 @@ PDF/HWP 입니다. 2026-09-28 조사 표본에서는 일부 최근 적재분이 
 이 유형에서 지원하지 않는 OR·제외어·정렬 등은 무시하지 않고 `INVALID_INPUT`으로 반환합니다.
 감사원 결정번호는 `type="audit_appeal", query="2025심사2038"`처럼 조회합니다.
 
+`search_taxlaw`에서도 "감사원 심사청구 법인세", "납세자보호위원회 세무조사",
+"쟁점별 사례 상속"처럼 자료 이름을 명시하면 전용 검색으로 연결합니다.
+문서번호 조회는 검색어별 최대 10페이지를 확인합니다. 한도를 넘으면
+`LOOKUP_INCOMPLETE`로 응답하며, 문서가 없거나 유일하다고 단정하지 않습니다.
+
 취득세·재산세·자동차세 등은 **지방세** 도구를, 양도소득세·법인세·부가가치세 등은
 **국세** 도구를 사용합니다.
 
@@ -58,7 +63,7 @@ korean-taxlaw-mcp를 이 컴퓨터에 로컬 MCP로 설치해줘.
 이름은 korean-taxlaw로 지정해줘.
 
 저장소: https://github.com/hyunae52/korean-taxlaw-mcp
-설치 기준: taxlab-v2.0.0.post1
+설치 기준: taxlab-v2.1.0.post1
 
 uv가 없으면 먼저 설치해. 그런 다음 uv tool로 패키지를 설치하고 실행 파일의 절대경로를
 찾아 Claude Desktop 설정에 넣어줘. 기존 MCP 설정은 그대로 두고, 끝나면 앱 재시작 방법을
@@ -76,7 +81,7 @@ korean-taxlaw-mcp를 이 컴퓨터에 로컬 MCP로 설치해줘.
 등록하고, 이름은 korean-taxlaw로 지정해줘.
 
 저장소: https://github.com/hyunae52/korean-taxlaw-mcp
-설치 기준: taxlab-v2.0.0.post1
+설치 기준: taxlab-v2.1.0.post1
 
 uv가 없으면 먼저 설치해. 그런 다음 uv tool로 패키지를 설치하고 실행 파일의 절대경로를
 찾아 ChatGPT 데스크톱 앱의 Codex MCP 설정에 넣어줘. 기존 MCP 설정은 그대로 두고,

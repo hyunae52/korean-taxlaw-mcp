@@ -144,6 +144,14 @@ def _params(
     """문서구분별 검색 파라미터. 필드 이름이 셋 다 다르므로 분기한다."""
     start_date = to_site_date(date_from)
     end_date = to_site_date(date_to)
+    for name, value, converted in (
+        ("date_from", date_from, start_date), ("date_to", date_to, end_date),
+    ):
+        if value and not converted:
+            raise NtsError(
+                ErrorCode.INVALID_INPUT, f"{name} 형식이 올바르지 않습니다: {value}",
+                hints=["YYYY, YYYY-MM, YYYY-MM-DD 또는 구분자 없는 숫자 형식을 사용하세요."],
+            )
     text = (query or "").strip()
 
     if doc_class == AUDIT_APPEAL:
@@ -248,6 +256,8 @@ async def search_special_documents(
         rows = []
     if total < 0 or not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise upstream("검색 응답의 목록 형식이 잘못됐습니다.", actionId=action_id)
+    if not rows and total > (page - 1) * limit:
+        raise upstream("검색 건수와 빈 목록이 일치하지 않습니다.", actionId=action_id, page=page)
     level = str(authority_for_doc_class(doc_class))
     items = [_row_to_item(doc_class, row, level) for row in rows[:limit]]
 
@@ -266,7 +276,7 @@ async def search_special_documents(
         out["bodyUnavailable"] = True
         out["bodyNote"] = (
             "감사원 심사청구는 사이트가 본문을 HTML 로 제공하지 않습니다. 본문은 행의 "
-            "attachment(첨부 PDF/HWP)에만 있고, 원본 스토리지에 파일이 없는 구간이 있습니다. "
+            "attachment(첨부 PDF/HWP)에만 있고, 일부 조사 표본은 파일 대신 오류 HTML을 반환했습니다. "
             "attachment_status=true 로 행별 확보 여부를 확인할 수 있습니다."
         )
     elif doc_class == TAXPAYER_PROTECTION:

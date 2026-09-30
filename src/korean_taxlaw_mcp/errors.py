@@ -16,6 +16,8 @@ class ErrorCode(StrEnum):
     NOT_FOUND = "NOT_FOUND"
     #: 같은 문서번호를 가진 자료가 여러 건이라 하나를 확정할 수 없다.
     AMBIGUOUS_DOCUMENT_NUMBER = "AMBIGUOUS_DOCUMENT_NUMBER"
+    #: 후보 검색 한도에 도달해 문서번호의 유일성·부존재를 확정하지 못했다.
+    LOOKUP_INCOMPLETE = "LOOKUP_INCOMPLETE"
     #: 문서는 찾았으나 본문을 원본이 제공하지 않는다. 부존재 주장 아님.
     DETAIL_NOT_AVAILABLE = "DETAIL_NOT_AVAILABLE"
     #: 국세법령정보시스템이 오류·점검·비정상 응답을 반환. 부존재 주장 아님.
@@ -39,6 +41,10 @@ GUARDRAIL: dict[ErrorCode, str] = {
     ErrorCode.AMBIGUOUS_DOCUMENT_NUMBER: (
         "동일한 문서번호를 가진 자료가 여러 건입니다. 임의로 하나를 정답으로 선택하지 말고 "
         "문서 주제나 검색 결과의 ntstDcmId로 대상을 구분하세요."
+    ),
+    ErrorCode.LOOKUP_INCOMPLETE: (
+        "문서번호 후보를 끝까지 확인하지 못했습니다. 한 문서를 정답으로 선택하거나 "
+        "자료가 없다고 단정하지 말고, 검색 결과의 ntstDcmId로 대상을 지정하세요."
     ),
     ErrorCode.DETAIL_NOT_AVAILABLE: (
         "문서는 존재하지만 본문을 가져오지 못했습니다. 본문을 추측·생성하지 마세요. "
