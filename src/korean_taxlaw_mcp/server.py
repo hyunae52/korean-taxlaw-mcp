@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
@@ -44,6 +45,16 @@ from .domains.local_tax import (
     search_local_documents,
 )
 from .domains.lookup import lookup_by_document_number
+from .domains.special import (
+    ATTACHMENT_STORAGE_GAP_DETECTED_ON,
+    ATTACHMENT_STORAGE_GAP_MEASURED,
+    ATTACHMENT_STORAGE_GAP_NOTE,
+    AUDIT_APPEAL,
+    CURATED_ISSUE,
+    TAXPAYER_PROTECTION,
+    search_special_documents,
+)
+from .domains.special import attachment_status as resolve_attachment_status
 from .errors import ErrorCode, NtsError, not_found
 from .research import tax_research as run_tax_research
 from .routing import route_query
@@ -83,6 +94,17 @@ _DECISION_TYPE_CODE = {
     "tribunal": "08",        # 심판청구
     "court": "09",           # 판례
     "constitutional": "10",  # 헌재
+}
+
+#: 공용 검색 액션(``ASIPDI002PR01``)을 쓰지 않는 문서구분 — ``domains/special.py`` 담당.
+#: type="all" 의 범위는 건드리지 않는다. 기존 결과 집합이 바뀌면 안 되기 때문이다.
+_SPECIAL_INTERPRETATION_TYPE_CODE = {
+    "curated_issue": CURATED_ISSUE,  # 13 자주찾는 쟁점별 사례
+}
+
+_SPECIAL_DECISION_TYPE_CODE = {
+    "audit_appeal": AUDIT_APPEAL,                # 11 감사원 심사청구
+    "taxpayer_protection": TAXPAYER_PROTECTION,  # 14 납세자보호위원회 심의사례
 }
 
 #: detail="compact" 에서 걷어내는 본문 절 필드. 요지(summary)·회신(answer)·
@@ -176,6 +198,102 @@ def _merge_law(query: str | None, law: str | None, article: str | None) -> str |
     return " ".join(parts) if parts else None
 
 
+def _ambiguous_document_number(document_number: str, outcome: dict[str, Any]) -> NtsError:
+    """두 진입점이 같은 후보 목록과 오류 계약을 전달한다."""
+    return NtsError(
+        ErrorCode.AMBIGUOUS_DOCUMENT_NUMBER,
+        f"문서번호 '{document_number}' 와 정확히 일치하는 문서가 여러 건입니다.",
+        hints=[
+            "lookup_tax_document의 context_query에 문서 주제의 핵심어를 넣어 다시 조회하세요.",
+            "후보의 ntstDcmId를 get_tax_document에 주면 문서를 직접 지정할 수 있습니다.",
+        ],
+        detail={
+            "normalizedDocumentNumber": outcome["normalizedDocumentNumber"],
+            "exactMatch": False,
+            "candidateCount": outcome["candidateCount"],
+            "candidates": outcome["candidates"],
+            "triedQueries": outcome["triedQueries"],
+            "searchedDomains": outcome["searchedDomains"],
+        },
+    )
+
+
+def _check_special_search_filters(*, match: str, exclude: list[str] | None,
+                                  sort: str | None, law: str | None = None,
+                                  article: str | None = None) -> None:
+    unsupported = [name for name, supplied in (
+        ("match=any", match != "all"), ("exclude", bool(exclude)),
+        ("sort", sort is not None), ("law", bool(law)), ("article", bool(article)),
+    ) if supplied]
+    if unsupported:
+        raise NtsError(ErrorCode.INVALID_INPUT,
+                       "이 문서구분에서 지원하지 않는 검색 조건입니다: " + ", ".join(unsupported),
+                       hints=["지원 조건으로 다시 조회하세요. 조건을 조용히 무시하지 않습니다."])
+
+
+async def _run_special_search(
+    *,
+    doc_class: str,
+    domain: str,
+    query: str | None,
+    tax_type_codes: list[str],
+    date_from: str | None,
+    date_to: str | None,
+    page: int,
+    limit: int,
+    unresolved: list[str],
+    attachment_status_on: bool = False,
+) -> str:
+    """공용 액션을 쓰지 않는 문서구분(11·13·14) 검색.
+
+    응답 형태는 공용 검색과 맞추되, ``11`` 은 본문이 없다는 사실과 첨부 스토리지 공백을
+    숨기지 않는다 — 조회 실패·파일 공백을 "자료 없음"으로 바꾸지 않는 이 서버의 규칙을 따른다.
+    """
+    result = await search_special_documents(
+        doc_class=doc_class,
+        query=query,
+        tax_type_codes=tax_type_codes,
+        date_from=date_from,
+        date_to=date_to,
+        page=page,
+        limit=limit,
+    )
+    if not result["items"]:
+        raise not_found(
+            f"{result['documentType']} 검색 결과가 없습니다 (query={query!r}).",
+            [
+                "키워드를 줄이세요.",
+                *([f"인식하지 못한 세목: {', '.join(unresolved)}"] if unresolved else []),
+            ],
+        )
+
+    if attachment_status_on and doc_class == AUDIT_APPEAL:
+        checked: list[dict[str, Any]] = []
+        for item in result["items"]:
+            attachment = item.get("attachment") or {}
+            if not attachment.get("fleId"):
+                checked.append(item)
+                continue
+            status = await resolve_attachment_status(
+                str(attachment["fleId"]),
+                str(attachment["fleSn"]) if attachment.get("fleSn") is not None else "",
+            )
+            checked.append({**item, "attachment": {**attachment, **status}})
+        result = {
+            **result,
+            "items": checked,
+            "attachmentGapNote": ATTACHMENT_STORAGE_GAP_NOTE,
+            "attachmentGapMeasured": ATTACHMENT_STORAGE_GAP_MEASURED,
+            "attachmentCheckedOn": datetime.now(timezone.utc).date().isoformat(),
+            "attachmentGapMeasuredOn": ATTACHMENT_STORAGE_GAP_DETECTED_ON,
+        }
+
+    payload: dict[str, Any] = {"domain": domain, **result}
+    if unresolved:
+        payload["unresolvedTaxTypes"] = unresolved
+    return _ok(payload)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. lookup_tax_document
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,6 +303,8 @@ def _merge_law(query: str | None, law: str | None, article: str | None) -> str |
     description=(
         "문서번호로 국세청 문서(해석례·판례·결정례 자동 판별)를 **정확히 일치할 때만** "
         "본문까지 반환한다. 표기 편차('서면 2026 법규재산 0119' 등)는 자동 정규화한다. "
+        "동일 번호가 여러 건이면 context_query로 주제를 구분하며, 확정할 수 없으면 "
+        "AMBIGUOUS_DOCUMENT_NUMBER를 반환한다. "
         "없으면 NOT_FOUND — similarDocuments 는 번호가 일부 겹치는 별개 문서이며 정답이 아니다. "
         "문서번호를 아는 경우 검색 대신 항상 이 도구를 먼저 쓸 것."
     ),
@@ -194,6 +314,10 @@ async def lookup_tax_document(
     document_number: Annotated[
         str, Field(min_length=2, description="문서번호. 표기 편차 자동 정규화.")
     ],
+    context_query: Annotated[
+        str | None,
+        Field(description="중복 문서번호를 구분할 주제 키워드. 중복일 때만 사용."),
+    ] = None,
     include_full_text: Annotated[bool, Field(description="본문 포함 여부")] = True,
     body_limit: Annotated[
         int | None, Field(ge=500, le=200_000, description="본문 최대 글자수(기본 30000)")
@@ -204,12 +328,18 @@ async def lookup_tax_document(
     ] = "full",
 ) -> str:
     outcome = await lookup_by_document_number(
-        document_number, include_full_text=include_full_text, body_limit=body_limit
+        document_number,
+        context_query=context_query,
+        include_full_text=include_full_text,
+        body_limit=body_limit,
     )
     if outcome["found"]:
         if detail == "compact":
             outcome = {**outcome, "document": _compact_document(outcome["document"])}
         return _ok(outcome)
+
+    if outcome.get("ambiguous"):
+        raise _ambiguous_document_number(document_number, outcome)
 
     raise NtsError(
         ErrorCode.NOT_FOUND,
@@ -244,6 +374,8 @@ async def lookup_tax_document(
     name="search_tax_interpretations",
     description=(
         "국세청 세법해석례(예규: 사전답변·질의회신·과세기준자문·고시서면질의)를 검색한다. "
+        "type='curated_issue' 는 같은 해석례를 쟁점별로 다시 묶은 자주찾는 쟁점별 사례(13)다. "
+        "13은 일반 텍스트 query와 단일 세목만 지원하며 OR·제외어·정렬·법령/조문·날짜 필터는 지원하지 않는다. "
         "결과는 요지까지만 담은 후보 목록이며 본문은 포함하지 않는다 — 필요한 문서만 "
         "get_tax_document 로 상세 조회할 것. 공백 구분 낱말은 AND, match='any' 는 OR, "
         "exclude 는 NOT. 문서번호를 알면 lookup_tax_document 를 쓸 것."
@@ -254,8 +386,8 @@ async def search_tax_interpretations(
     query: Annotated[str | None, Field(description="검색 키워드. 공백 구분은 AND.")] = None,
     document_number: Annotated[str | None, Field(description="문서번호를 주면 exact lookup 수행.")] = None,
     type: Annotated[
-        Literal["all", "advance", "written", "advisory", "notice_written"],
-        Field(description="all(기본) | advance(사전답변) | written(질의회신) | advisory(과세기준자문) | notice_written(고시서면질의)"),
+        Literal["all", "advance", "written", "advisory", "notice_written", "curated_issue"],
+        Field(description="all(기본) | advance(사전답변) | written(질의회신) | advisory(과세기준자문) | notice_written(고시서면질의) | curated_issue(13 자주찾는 쟁점별 사례)"),
     ] = "all",
     tax_type: Annotated[str | list[str] | None, Field(description="세목. 이름·별칭·코드 허용.")] = None,
     law: Annotated[str | None, Field(description="관련 법령명")] = None,
@@ -270,7 +402,30 @@ async def search_tax_interpretations(
 ) -> str:
     # 문서번호가 주어지면 키워드 검색이 아니라 exact lookup 이 먼저다.
     if document_number and document_number.strip():
-        return await lookup_tax_document(document_number=document_number)
+        return await lookup_tax_document(document_number=document_number, context_query=query)
+
+    # 13(자주찾는 쟁점별 사례)은 공용 검색 액션을 쓰지 않는다 — domains/special.py 담당.
+    if type == "curated_issue":
+        _check_special_search_filters(match=match, exclude=exclude, sort=sort,
+                                      law=law, article=article)
+        if date_from or date_to:
+            raise NtsError(
+                ErrorCode.INVALID_INPUT,
+                "자주찾는 쟁점별 사례(13)는 원본이 등록일 필터를 제공하지 않습니다.",
+            )
+        codes, unresolved = _resolve_tax_types(tax_type)
+        if len(codes) > 1:
+            raise NtsError(ErrorCode.INVALID_INPUT, "자주찾는 쟁점별 사례는 한 번에 세목 하나만 검색할 수 있습니다.")
+        if not query and not codes:
+            raise NtsError(
+                ErrorCode.INVALID_INPUT,
+                "query 또는 tax_type 중 최소 하나는 필요합니다.",
+            )
+        return await _run_special_search(
+            doc_class=CURATED_ISSUE, domain="interpretation", query=query,
+            tax_type_codes=codes, date_from=None, date_to=None,
+            page=page, limit=limit, unresolved=unresolved,
+        )
 
     codes, unresolved = _resolve_tax_types(tax_type)
     merged = _merge_law(query, law, article)
@@ -310,8 +465,13 @@ async def search_tax_interpretations(
     name="search_tax_decisions",
     description=(
         "국세청·조세심판원·법원의 판례·결정례(과세적부·이의신청·심사청구·심판청구·판례·헌재)를 "
-        "검색한다. 결과는 본문 없는 후보 목록 — 필요한 문서만 get_tax_document 로 조회할 것. "
-        "결정결과(인용·기각·국승·국패 등)와 귀속연도 필터 지원. "
+        "검색한다. type='audit_appeal'(11 감사원 심사청구)·'taxpayer_protection'(14 납세자보호위원회 "
+        "심의사례)은 원본이 별도 모듈로 제공하는 문서구분이다 — 감사원 심사청구는 본문이 없고 "
+        "첨부 PDF/HWP 로만 존재한다(attachment_status=true 로 파일 서명 앞부분 확인, 전체 파일 검증 아님). "
+        "11·14는 일반 텍스트 query·날짜만 지원하며 OR·제외어·정렬·세목 필터는 지원하지 않는다. "
+        "11의 결정번호는 query에 넣는다. 11·14에서는 case_number exact lookup을 지원하지 않는다. "
+        "결과는 본문 없는 후보 목록 — 필요한 문서만 get_tax_document 로 조회할 것. "
+        "결정결과(인용·기각·국승·국패 등)와 귀속연도 필터는 05~10 에만 적용된다. "
         "사건번호를 알면 case_number 로 exact lookup 이 수행된다."
     ),
 )
@@ -320,8 +480,11 @@ async def search_tax_decisions(
     query: Annotated[str | None, Field(description="검색 키워드")] = None,
     case_number: Annotated[str | None, Field(description="사건번호/문서번호. exact lookup 수행.")] = None,
     type: Annotated[
-        Literal["all", "pre_assessment", "objection", "review", "tribunal", "court", "constitutional"],
-        Field(description="all(기본) | pre_assessment(과세적부) | objection(이의신청) | review(심사청구) | tribunal(심판청구) | court(판례) | constitutional(헌재)"),
+        Literal[
+            "all", "pre_assessment", "objection", "review", "tribunal", "court", "constitutional",
+            "audit_appeal", "taxpayer_protection",
+        ],
+        Field(description="all(기본, 05~10) | pre_assessment(과세적부) | objection(이의신청) | review(심사청구) | tribunal(심판청구) | court(판례) | constitutional(헌재) | audit_appeal(11 감사원 심사청구) | taxpayer_protection(14 납세자보호위원회 심의사례)"),
     ] = "all",
     tax_type: Annotated[str | list[str] | None, Field(description="세목")] = None,
     result: Annotated[list[str] | None, Field(description="결정 결과 필터(인용/기각/각하/경정/국승/국패 등)")] = None,
@@ -335,9 +498,21 @@ async def search_tax_decisions(
     sort: Annotated[Literal["latest", "oldest", "relevance"] | None, Field(description="정렬")] = None,
     page: Annotated[int, Field(ge=1)] = 1,
     limit: Annotated[int, Field(ge=1, le=100, description="페이지 크기. 명시 요청 없이는 늘리지 말 것.")] = DEFAULT_SEARCH_LIMIT,
+    attachment_status: Annotated[
+        bool,
+        Field(description="audit_appeal(11) 전용. 행당 메타데이터 및 최대 4 KiB 파일 서명 요청으로 확인한다. 전체 파일 무결성은 검증하지 않는다."),
+    ] = False,
 ) -> str:
+    if attachment_status and type != "audit_appeal":
+        raise NtsError(ErrorCode.INVALID_INPUT, "attachment_status는 audit_appeal 전용입니다.")
+    if type in _SPECIAL_DECISION_TYPE_CODE:
+        _check_special_search_filters(match=match, exclude=exclude, sort=sort)
+        if tax_type or case_number:
+            raise NtsError(ErrorCode.INVALID_INPUT,
+                           "11·14는 tax_type 및 case_number를 지원하지 않습니다.",
+                           hints=["감사원 결정번호는 type='audit_appeal'과 query로 검색하세요."])
     if case_number and case_number.strip():
-        return await lookup_tax_document(document_number=case_number)
+        return await lookup_tax_document(document_number=case_number, context_query=query)
 
     codes, unresolved = _resolve_tax_types(tax_type)
     result_codes, unresolved_results = _resolve_decision_results(result)
@@ -348,10 +523,34 @@ async def search_tax_decisions(
             hints=[f"사용 가능한 값: {', '.join(dict.fromkeys(DECISION_RESULT.values()))}"],
         )
     merged = _merge_law(query, law, article)
-    if not merged and not codes and not result_codes and not date_from and not date_to and not attribution_year:
+    # 11 감사원 심사청구·14 납세자보호위원회는 원본 화면이 전체 목록 열람을 허용한다.
+    # 다른 문서구분은 키워드 없이 전량 조회를 막지만, 이 둘은 조건 없이도 조회되게 둔다.
+    if (
+        type not in _SPECIAL_DECISION_TYPE_CODE
+        and not merged
+        and not codes
+        and not result_codes
+        and not date_from
+        and not date_to
+        and not attribution_year
+    ):
         raise NtsError(
             ErrorCode.INVALID_INPUT,
             "query, tax_type, result, attribution_year, date_from/date_to 중 최소 하나는 필요합니다.",
+        )
+
+    if type in _SPECIAL_DECISION_TYPE_CODE:
+        if result_codes or attribution_year:
+            raise NtsError(
+                ErrorCode.INVALID_INPUT,
+                "감사원 심사청구(11)·납세자보호위원회 심의사례(14)는 원본이 결정결과·"
+                "귀속연도 필터를 제공하지 않습니다.",
+            )
+        return await _run_special_search(
+            doc_class=_SPECIAL_DECISION_TYPE_CODE[type], domain="decision", query=merged,
+            tax_type_codes=codes, date_from=date_from, date_to=date_to,
+            page=page, limit=limit, unresolved=unresolved,
+            attachment_status_on=attachment_status,
         )
 
     classes = list(DECISION_CLASSES) if type == "all" else [_DECISION_TYPE_CODE[type]]
@@ -556,7 +755,9 @@ async def search_tax_forms(
         "국세청 자료 전 영역을 한 번에 검색한다(해석례·결정례·고시훈령·서식). "
         "질의에 문서번호가 섞여 있으면 exact lookup 을 최우선으로 시도한다. "
         "domains 를 생략하면 질의 표현('예규', '심판', '통칙', '적부' 등)을 보고 조회 영역을 "
-        "자동 결정한다. 어느 영역을 봐야 할지 모를 때의 진입점으로 쓸 것."
+        "자동 결정한다. 감사원 심사청구·납세자보호위원회·쟁점별 사례를 명시하면 전용 검색을 쓴다. "
+        "중복 문서번호는 AMBIGUOUS_DOCUMENT_NUMBER를 반환한다. "
+        "어느 영역을 봐야 할지 모를 때의 진입점으로 쓸 것."
     ),
 )
 @_envelope_errors
@@ -567,7 +768,7 @@ async def search_taxlaw(
         Field(description="조회할 영역. 생략하면 자동 결정."),
     ] = None,
     tax_type: Annotated[str | list[str] | None, Field(description="세목(명시하면 필터로 적용)")] = None,
-    limit_per_domain: Annotated[int, Field(ge=1, le=50, description="영역별 결과 수")] = 5,
+    limit_per_domain: Annotated[int, Field(ge=1, le=50, description="영역 내 자료유형별 결과 수")] = 5,
 ) -> str:
     hint = route_query(query)
     targets = list(domains) if domains else (hint.domains or ["interpretation", "decision"])
@@ -580,33 +781,71 @@ async def search_taxlaw(
     # 목적이므로 본문 상세 조회는 생략한다(필요하면 get_tax_document 로 이어서 조회).
     if hint.document_number or looks_like_document_number(query):
         outcome = await lookup_by_document_number(
-            hint.document_number or query.strip(), metadata_only=True
+            hint.document_number or query.strip(),
+            context_query=hint.content_query,
+            metadata_only=True,
         )
         if outcome["found"]:
             return _ok({
-                "resolvedBy": "documentNumber",
+                "resolvedBy": outcome.get("resolvedBy", "documentNumber"),
+                **({"candidateCount": outcome["candidateCount"]} if "candidateCount" in outcome else {}),
                 "exactMatch": True,
                 "document": outcome["document"],
                 "note": "본문은 get_tax_document(ntst_dcm_id)로 조회하세요.",
             })
+        if outcome.get("ambiguous"):
+            raise _ambiguous_document_number(hint.document_number or query.strip(), outcome)
+
+    special_types = {
+        "interpretation": _SPECIAL_INTERPRETATION_TYPE_CODE,
+        "decision": _SPECIAL_DECISION_TYPE_CODE,
+    }
+    requested_special = {
+        code for domain in targets for code in special_types.get(domain, {}).values()
+        if code in hint.doc_classes
+    }
+    # 입력 오류는 부분적인 원본 장애로 감싸거나 필터 없이 재조회하지 않는다.
+    if tax_type and requested_special & {AUDIT_APPEAL, TAXPAYER_PROTECTION}:
+        raise NtsError(ErrorCode.INVALID_INPUT, "감사원·납세자보호위원회 검색은 세목 필터를 지원하지 않습니다.")
+    if CURATED_ISSUE in requested_special:
+        if len(codes) > 1:
+            raise NtsError(ErrorCode.INVALID_INPUT, "자주찾는 쟁점별 사례는 한 번에 세목 하나만 검색할 수 있습니다.")
+        if not hint.content_query and not codes:
+            raise NtsError(ErrorCode.INVALID_INPUT, "쟁점별 사례 검색에는 내용 키워드 또는 세목이 필요합니다.")
 
     results: dict[str, Any] = {}
     errors: dict[str, str] = {}
 
     async def one(domain: str) -> None:
         try:
-            if domain == "interpretation":
-                classes = [c for c in hint.doc_classes if c in INTERPRETATION_CLASSES] or list(INTERPRETATION_CLASSES)
-                results["interpretation"] = await search_documents(
-                    doc_classes=classes, query=search_query, tax_type_codes=codes,
-                    limit=limit_per_domain, sort="relevance",
-                )
-            elif domain == "decision":
-                classes = [c for c in hint.doc_classes if c in DECISION_CLASSES] or list(DECISION_CLASSES)
-                results["decision"] = await search_documents(
-                    doc_classes=classes, query=search_query, tax_type_codes=codes,
-                    limit=limit_per_domain, sort="relevance",
-                )
+            if domain in special_types:
+                standard_classes = INTERPRETATION_CLASSES if domain == "interpretation" else DECISION_CLASSES
+                classes = [c for c in hint.doc_classes if c in standard_classes]
+                special = {name: code for name, code in special_types[domain].items()
+                           if code in hint.doc_classes}
+                if not classes and not special:
+                    classes = list(standard_classes)
+                searches = {}
+                if classes:
+                    searches["standard"] = search_documents(
+                        doc_classes=classes, query=search_query, tax_type_codes=codes,
+                        limit=limit_per_domain, sort="relevance",
+                    )
+                for name, code in special.items():
+                    searches[name] = search_special_documents(
+                        doc_class=code, query=hint.content_query or None,
+                        tax_type_codes=codes, limit=limit_per_domain,
+                    )
+                found = await asyncio.gather(*searches.values(), return_exceptions=True)
+                successful = {}
+                for name, result in zip(searches, found, strict=True):
+                    if isinstance(result, BaseException):
+                        errors[f"{domain}.{name}"] = str(result)
+                    else:
+                        successful[name] = result
+                # 서로 다른 출처의 링크·본문 제공 여부를 섞지 않는다.
+                if successful:
+                    results[domain] = next(iter(successful.values())) if len(searches) == 1 else successful
             elif domain == "guidance":
                 # 통칙·집행기준은 법령명이 필요하므로 통합검색에서는 고시·훈령만 훑는다.
                 notice, directive = await asyncio.gather(

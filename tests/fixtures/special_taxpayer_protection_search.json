@@ -1,0 +1,26 @@
+{
+  "pageIndex": 1,
+  "recordCountPerPage": 3,
+  "recordCount": 165,
+  "dcmBscDVOList": [
+    {
+      "frsRgtDtm": "20260709",
+      "fnm": "○○○",
+      "ntstDcmId": "200000000000022050",
+      "ntstDcmClCd": "14",
+      "ntstDcmTtl": "세무조사 착수시 세무공무원의 위법·부당한 행위 여부",
+      "fleId": "300000000001208219",
+      "ntstTLawClNm": "법인"
+    },
+    {
+      "frsRgtDtm": "20260709",
+      "fnm": "○○○",
+      "ntstDcmId": "200000000000022049",
+      "ntstDcmClCd": "14",
+      "ntstDcmTtl": "쟁점 신고내용 확인은 질문․조사권이 행사되어 실질적인 세무조사에 해당한다는 주장의 당부",
+      "fleId": "300000000001208216",
+      "ntstTLawClNm": "종소"
+    }
+  ],
+  "ntstDcmClCd": "14"
+}

@@ -36,7 +36,19 @@ DETAIL_ACTION = "ASIQTB002PR01"
 INTERPRETATION_CLASSES = ("01", "02", "03", "04")
 DECISION_CLASSES = ("05", "06", "07", "08", "09", "10")
 
+#: 사이트가 공용 검색 액션(``ASIPDI002PR01``)을 쓰지 않는 문서구분.
+#: 검색은 :mod:`~korean_taxlaw_mcp.domains.special` 이 담당하고, 이 모듈은 **상세**만
+#: 다룬다 — 13·14 의 상세는 공용 상세 액션(``ASIQTB002PR01``)을 그대로 쓴다(실측).
+SPECIAL_DOC_CLASSES = ("11", "13", "14")
+
 _DECISION_SET = set(DECISION_CLASSES)
+
+#: 불복·심의 결정으로 분류되는 문서구분. ``DECISION_CLASSES``(= 도구의 type="all" 검색
+#: 범위)와 일부러 분리한다 — 11·14 를 더한다고 기존 검색 범위가 넓어지면 안 된다.
+_ADJUDICATION_SET = _DECISION_SET | {"11", "14"}
+
+#: 상세 화면 경로 키. 14 는 납세자보호위원회 전용 팝업을 쓴다.
+_DETAIL_KIND = {"11": "audit_appeal", "13": "question", "14": "taxpayer_protection"}
 
 
 def _to_dcm_cl_cd_ctl(classes: list[str]) -> list[str]:
@@ -45,11 +57,17 @@ def _to_dcm_cl_cd_ctl(classes: list[str]) -> list[str]:
 
 
 def _domain_for(doc_class: str) -> str:
-    return "decision" if doc_class in _DECISION_SET else "interpretation"
+    return "decision" if doc_class in _ADJUDICATION_SET else "interpretation"
 
 
 def _kind_for(doc_class: str) -> str:
-    return "precedent" if _domain_for(doc_class) == "decision" else "question"
+    """상세 화면 경로 키.
+
+    13(쟁점별 사례)의 상세는 원래 문서구분(01·02)이 그대로 남아 해석례 팝업을 쓴다.
+    """
+    return _DETAIL_KIND.get(doc_class) or (
+        "precedent" if doc_class in _DECISION_SET else "question"
+    )
 
 
 def _row_to_summary(dcm: dict[str, Any]) -> dict[str, Any]:
@@ -210,7 +228,7 @@ async def search_documents(
 async def get_document(
     ntst_dcm_id: str, *, include_full_text: bool = True, body_limit: int | None = None
 ) -> dict[str, Any]:
-    """상세 조회. 문서 종류에 상관없이 액션 하나로 처리된다(01~10 전부 실측 확인).
+    """상세 조회. 문서 종류에 상관없이 액션 하나로 처리된다(01~10·13·14 실측 확인).
 
     본문이 없으면 ``bodyUnavailable`` 을 표시한다 — 절대 "자료 없음"으로 내리지
     않는다. 문서는 존재하는데 본문만 못 얻은 상황을 부존재로 번역하면 안 된다.
