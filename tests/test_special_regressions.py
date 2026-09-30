@@ -46,6 +46,112 @@ async def test_broken_special_response_is_not_document_absence(upstream, payload
     assert label == "UPSTREAM_ERROR", (label, result)
 
 
+@pytest.mark.parametrize("kind,action,key", [
+    ("audit_appeal", "ASIPDM001MR01", "badiRvwDVOList"),
+    ("taxpayer_protection", "ASIPRC019MR02", "dcmBscDVOList"),
+])
+async def test_nonzero_count_empty_page_is_not_document_absence(upstream, kind, action, key):
+    upstream.payload[action] = {"recordCount": 5, key: []}
+    label, result = await call("search_tax_decisions", {"type": kind})
+    assert label == "UPSTREAM_ERROR", result
+    # A page past the end of a valid result set may legitimately be empty.
+    label, result = await call("search_tax_decisions", {"type": kind, "page": 2, "limit": 5})
+    assert label == "NOT_FOUND", result
+
+
+@pytest.mark.parametrize("kind", ["audit_appeal", "taxpayer_protection"])
+@pytest.mark.parametrize("field", ["date_from", "date_to"])
+@pytest.mark.parametrize("date", ["2026-02-30", "2026/09/30", "not-a-date"])
+async def test_invalid_special_date_is_rejected_before_search(upstream, kind, field, date):
+    label, result = await call("search_tax_decisions", {"type": kind, field: date})
+    assert label == "INVALID_INPUT", result
+    assert not upstream.calls
+
+
+@pytest.mark.parametrize("kind,action", [
+    ("audit_appeal", "ASIPDM001MR01"),
+    ("taxpayer_protection", "ASIPRC019MR02"),
+])
+async def test_valid_special_dates_are_applied(upstream, kind, action):
+    label, result = await call("search_tax_decisions", {
+        "type": kind, "date_from": "2026-02", "date_to": "20260930",
+    })
+    assert label == "OK", result
+    params = upstream.last_params(action)
+    assert params["bltnStrtDt"] == "20260201"
+    assert params["bltnEndDt"] == "20260930"
+
+
+@pytest.mark.parametrize("query,action,field,text,domain", [
+    ("감사원 심사청구 법인세", "ASIPDM001MR01", "ntstDcmTtl", "법인세", "decision"),
+    ("납세자 보호 위원회 심의 사례 세무조사", "ASIPRC019MR02", "searchKeyword", "세무조사", "decision"),
+    ("납보위 세무조사", "ASIPRC019MR02", "searchKeyword", "세무조사", "decision"),
+    ("자주 찾는 쟁점별 사례 상속", "ASIQTH001MR01", "schNtstDcmGistCntn", "상속", "interpretation"),
+    ("감사원 심사청구 2025심사2038", "ASIPDM001MR01", "ntstDcmDscmCntn", "2025심사2038", "decision"),
+    ("감사원 심사청구 2011감심200", "ASIPDM001MR01", "ntstDcmDscmCntn", "2011감심200", "decision"),
+    ("감사원 심사청구 찾아줘", "ASIPDM001MR01", "ntstDcmTtl", "", "decision"),
+])
+async def test_unified_search_uses_the_requested_source(upstream, query, action, field, text, domain):
+    label, result = await call("search_taxlaw", {"query": query, "limit_per_domain": 1})
+    assert label == "OK", result
+    assert result["results"][domain]["items"]
+    assert len(result["results"][domain]["items"]) == 1
+    assert [name for name, _ in upstream.calls] == [action]
+    assert upstream.last_params(action)[field] == text
+
+
+@pytest.mark.parametrize("args", [
+    {"query": "감사원 심사청구 법인세", "tax_type": "법인세"},
+    {"query": "납세자보호위원회 세무조사", "tax_type": "법인세"},
+    {"query": "쟁점별 사례 상속", "tax_type": ["소득세", "법인세"]},
+    {"query": "자주찾는 쟁점별 사례"},
+])
+async def test_unified_special_search_preserves_filter_contract(upstream, args):
+    label, result = await call("search_taxlaw", args)
+    assert label == "INVALID_INPUT", result
+    assert not upstream.calls
+
+
+async def test_unified_search_keeps_each_special_source_metadata(upstream):
+    label, result = await call("search_taxlaw", {"query": "감사원 심사청구 납세자보호위원회 세무조사"})
+    assert label == "OK", result
+    sources = result["results"]["decision"]
+    assert sources["audit_appeal"]["bodyUnavailable"] is True
+    assert sources["audit_appeal"]["items"][0]["attachment"]
+    assert sources["taxpayer_protection"]["items"][0]["ntstDcmId"]
+    assert {name for name, _ in upstream.calls} == {"ASIPDM001MR01", "ASIPRC019MR02"}
+
+
+async def test_unified_search_combines_standard_and_special_sources(upstream):
+    from .conftest import load
+    upstream.payload["ASIPDI002PR01"] = load("search_court")
+    label, result = await call("search_taxlaw", {"query": "감사원 심사청구 판례 법인세"})
+    assert label == "OK", result
+    sources = result["results"]["decision"]
+    assert sources["standard"]["items"]
+    assert sources["audit_appeal"]["items"]
+    assert upstream.last_params("ASIPDI002PR01")["dcmClCdCtl"] == ["001_09"]
+
+
+async def test_default_unified_search_does_not_expand_to_special_sources(upstream):
+    await call("search_taxlaw", {"query": "법인세"})
+    assert {name for name, _ in upstream.calls} == {"ASIPDI002PR01"}
+
+
+async def test_unified_source_failure_preserves_other_results(upstream):
+    upstream.payload["ASIPDM001MR01"] = {}  # malformed audit source response
+    label, result = await call("search_taxlaw", {"query": "감사원 심사청구 납세자보호위원회 세무조사"})
+    assert label == "OK", result
+    assert result["results"]["decision"]["taxpayer_protection"]["items"]
+    assert "decision.audit_appeal" in result["partialErrors"]
+
+
+async def test_unified_special_failure_is_not_absence(upstream):
+    upstream.payload["ASIPDM001MR01"] = {}
+    label, result = await call("search_taxlaw", {"query": "감사원 심사청구 법인세"})
+    assert label == "UPSTREAM_ERROR", result
+
+
 async def test_attachment_missing_serial_keeps_search_result(upstream):
     row = upstream.payload["ASIPDM001MR01"]["badiRvwDVOList"][0]
     row.pop("fleSn", None)

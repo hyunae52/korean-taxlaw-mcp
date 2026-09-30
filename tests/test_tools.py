@@ -35,6 +35,7 @@ class Upstream:
         self.calls: list[tuple[str, dict]] = []
         self.search_by_query: dict[str, str] = {}
         self.search_payload: dict[str, dict] = {}
+        self.search_pages: dict[tuple[str, int], dict] = {}
         self.detail_by_id: dict[str, str] = {}
         #: fixture 를 손봐서 돌려주고 싶을 때(본문 제거 등) 쓰는 직접 주입 경로
         self.detail_payload: dict[str, dict] = {}
@@ -49,6 +50,9 @@ class Upstream:
         if action_id == "ASIPDI002PR01":
             include = param.get("icldVcbCtl") or []
             key = " ".join(include)
+            page_key = (key, param.get("startCount", 1))
+            if page_key in self.search_pages:
+                return httpx.Response(200, json=_envelope(action_id, self.search_pages[page_key]))
             if key in self.search_payload:
                 return httpx.Response(200, json=_envelope(action_id, self.search_payload[key]))
             name = self.search_by_query.get(key, self.default_search)
