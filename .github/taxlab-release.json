@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "zisu17/korean-taxlaw-mcp",
+    "version": "2.1.0",
+    "commit": "a91872fed2c12cd51fffdc4c2dbbfcabe997262b"
+  },
+  "fork": {
+    "repository": "hyunae52/korean-taxlaw-mcp",
+    "version": "2.1.0.post1",
+    "tag": "taxlab-v2.1.0.post1"
+  }
+}
