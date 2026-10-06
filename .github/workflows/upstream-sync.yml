@@ -1,131 +1,111 @@
-name: Upstream sync candidate
-
+name: Automatic upstream sync
 on:
   schedule:
-    - cron: "10 19 * * *" # 04:10 KST
+    - cron: "10 17 * * *" # 02:10 KST; before the harness update and 03:30 email.
   workflow_dispatch:
-
+permissions:
+  contents: read
 concurrency:
   group: upstream-sync-candidate
   cancel-in-progress: false
-
-env:
-  CANDIDATE_BRANCH: automation/upstream-zisu17-main
-  UPSTREAM_REPOSITORY: zisu17/korean-taxlaw-mcp
-
 jobs:
   prepare:
-    name: Prepare candidate
+    if: github.repository == 'hyunae52/korean-taxlaw-mcp' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
     outputs:
       changed: ${{ steps.candidate.outputs.changed }}
-      head_sha: ${{ steps.candidate.outputs.head_sha }}
+      runtime_changed: ${{ steps.candidate.outputs.runtime_changed }}
+      base: ${{ steps.candidate.outputs.base }}
+      head: ${{ steps.candidate.outputs.head }}
+      tag: ${{ steps.candidate.outputs.tag }}
+      version: ${{ steps.candidate.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
       - id: candidate
-        name: Merge upstream into an isolated candidate branch
+        name: Prepare source without executing upstream code
         shell: bash
         run: |
           set -euo pipefail
-          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
-          git fetch --no-tags upstream main
-          git fetch --no-tags origin main
-
-          if git ls-remote --exit-code --heads origin "$CANDIDATE_BRANCH" >/dev/null 2>&1; then
-            git fetch --no-tags origin \
-              "refs/heads/${CANDIDATE_BRANCH}:refs/remotes/origin/${CANDIDATE_BRANCH}"
+          cp .github/scripts/sync_upstream.py /tmp/trusted-sync.py
+          git fetch --no-tags https://github.com/zisu17/korean-taxlaw-mcp.git main
+          upstream=$(git rev-parse FETCH_HEAD)
+          git fetch origin main --tags
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -C automation/upstream-zisu17-main origin/main
+          python /tmp/trusted-sync.py --root "$PWD" --upstream "$upstream"
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+            git push origin "HEAD:refs/heads/automation/zisu-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           fi
-
-          if git merge-base --is-ancestor upstream/main origin/main; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "head_sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch --force-create "$CANDIDATE_BRANCH" origin/main
-          git merge --no-edit --no-ff upstream/main
-          head_sha=$(git rev-parse HEAD)
-          git push --force-with-lease origin "HEAD:refs/heads/${CANDIDATE_BRANCH}"
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
-
   validate:
-    name: Validate / Python ${{ matrix.python-version }}
-    if: needs.prepare.outputs.changed == 'true'
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    permissions:
-      contents: read
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.13"]
+        python: ['3.11', '3.13']
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          ref: ${{ needs.prepare.outputs.head_sha }}
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.head }}
       - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python }}
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
-        with:
-          enable-cache: true
-      - name: Install locked dependencies
-        run: uv sync --locked --extra dev
-      - name: Verify committed fixtures
+      - name: Verify release identity and install locked dependencies
         run: |
+          python .github/scripts/check_release_version.py
+          uv sync --locked --extra dev
           test -f tests/fixtures/codes.json.gz
           test -f tests/fixtures/olta_search_interpretation.html.gz
-      - name: Run offline tests without skips
+      - name: Run offline tests without skipped cases
         shell: bash
         run: |
           set -eo pipefail
-          uv run python -W error::SyntaxWarning -m pytest -q -ra --strict-markers \
-            --ignore=tests/test_live.py | tee /tmp/pytest.out
-          if grep -qE "[0-9]+ skipped" /tmp/pytest.out; then
-            echo "::error::Offline tests contain skipped cases."
-            exit 1
-          fi
-
-  open-pr:
-    name: Open reviewed candidate PR
-    if: needs.prepare.outputs.changed == 'true'
+          uv run python -W error::SyntaxWarning -m pytest -q -ra --strict-markers --ignore=tests/test_live.py | tee /tmp/pytest.out
+          if grep -qE '[0-9]+ skipped' /tmp/pytest.out; then exit 1; fi
+  publish:
     needs: [prepare, validate]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      BASE: ${{ needs.prepare.outputs.base }}
+      HEAD: ${{ needs.prepare.outputs.head }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      RUNTIME_CHANGED: ${{ needs.prepare.outputs.runtime_changed }}
+      CHANGED: ${{ needs.prepare.outputs.changed }}
     steps:
-      - name: Create or refresh the candidate pull request
+      - name: Record PR and fast-forward only the tested source
         shell: bash
         run: |
           set -euo pipefail
-          body=$(cat <<EOF
-          Automated candidate from \`${UPSTREAM_REPOSITORY}:main\`.
-
-          Candidate commit: \`${{ needs.prepare.outputs.head_sha }}\`
-          Validation run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-
-          The workflow merged upstream without executing it in the write-enabled job. Offline tests ran separately with read-only permissions on Python 3.11 and 3.13. Production activation still requires human review and an explicit Legal Harness release change.
-          EOF
-          )
-          number=$(gh pr list --state open --head "$CANDIDATE_BRANCH" --base main --json number --jq '.[0].number // empty')
-          if [[ -n "$number" ]]; then
-            gh pr edit "$number" --title "chore: sync zisu17 upstream" --body "$body"
-          else
-            gh pr create --base main --head "$CANDIDATE_BRANCH" \
-              --title "chore: sync zisu17 upstream" --body "$body"
+          [[ "$BASE" =~ ^[a-f0-9]{40}$ && "$HEAD" =~ ^[a-f0-9]{40}$ ]]
+          test "$(gh api repos/$GH_REPO/git/ref/heads/main --jq .object.sha)" = "$BASE"
+          if [[ "$CHANGED" == true ]]; then
+            branch="automation/zisu-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            test "$(gh api repos/$GH_REPO/git/ref/heads/$branch --jq .object.sha)" = "$HEAD"
+            printf 'Automated zisu17 runtime sync.\n\nExact tested commit: %s\nPython 3.11/3.13 offline tests and version identity passed.\nRun: %s/%s/actions/runs/%s\n\nFork workflows and local runtime patches are protected.\n' "$HEAD" "$GITHUB_SERVER_URL" "$GH_REPO" "$GITHUB_RUN_ID" > /tmp/pr-body.md
+            gh pr create --base main --head "$branch" --title "chore: sync zisu17 as $RELEASE_VERSION" --body-file /tmp/pr-body.md
+            # Non-forced fast-forward rejects a concurrently changed main atomically.
+            gh api -X PATCH "repos/$GH_REPO/git/refs/heads/main" -f sha="$HEAD" -F force=false
+          fi
+          [[ "$RELEASE_TAG" =~ ^taxlab-v[0-9]+\.[0-9]+\.[0-9]+\.post[1-9][0-9]*$ ]]
+          # Retry a failed release publication even when upstream has not changed.
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            printf 'Automatically validated TaxLab fork %s.\n\nCommit: %s\nValidation: %s/%s/actions/runs/%s\n\nThe Legal Harness pipeline separately verifies integration and production retrieval before deployment.\n' "$RELEASE_VERSION" "$HEAD" "$GITHUB_SERVER_URL" "$GH_REPO" "$GITHUB_RUN_ID" > /tmp/release.md
+            gh release create "$RELEASE_TAG" --target "$HEAD" --title "TaxLab $RELEASE_VERSION" --notes-file /tmp/release.md --latest
           fi
