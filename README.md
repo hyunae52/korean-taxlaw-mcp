@@ -3,7 +3,9 @@
 > **TaxLab downstream limited beta (`2.1.0.post1`):** 이 저장소는
 > [`zisu17/korean-taxlaw-mcp`](https://github.com/zisu17/korean-taxlaw-mcp)
 > `v2.1.0`을 기준으로 검토한 Hyunae 운영 포크입니다. 운영은 이 포크의 고정 커밋을
-> 사용하고 원본 변경은 매일 후보로만 확인합니다. 자동 병합·배포하지 않습니다.
+> 사용하고 원본 변경은 매일 검사합니다. 충돌·라이선스·버전 검사와 Python 3.11/3.13
+> 테스트를 통과하면 자동으로 포크에 병합하고 새 릴리스를 발행합니다. 서버 반영은
+> Legal Harness의 별도 통합·실제 조회 검증을 통과해야 합니다.
 > 신고·불복 등 실제 업무의 단독 근거로 사용하지 마세요.
 
 `post1`의 의미와 원작자·포크 버전 대응은 [버전 관리](docs/RELEASE_VERSIONING.md),
@@ -116,7 +118,7 @@ MCP가 연결된 대화 창에서 일반 문장으로 요청하면 됩니다.
 - [설치 가이드](docs/INSTALLATION.md) — 운영체제·클라이언트별 설치와 문제 해결
 - [개발 가이드](docs/DEVELOPMENT.md) — 개발 환경과 테스트
 - [지원 범위 조사](docs/INVESTIGATION.md) — 원본 시스템 분석과 지원·미지원 데이터
-- [포크 유지관리](docs/FORK_MAINTENANCE.md) — upstream 동기화 후보와 승인 절차
+- [포크 유지관리](docs/FORK_MAINTENANCE.md) — upstream 자동 동기화와 중단 조건
 - [제한 베타 범위](docs/LIMITED_BETA.md) — 설치 기준, 데이터 취급과 비보장 범위
 
 ## 알아두기

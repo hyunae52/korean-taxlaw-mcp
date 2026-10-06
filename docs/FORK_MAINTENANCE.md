@@ -19,16 +19,25 @@ changes do not create a new deployed package. Follow the
 [release version procedure](RELEASE_VERSIONING.md), and keep the release history in
 [GitHub Releases](https://github.com/hyunae52/korean-taxlaw-mcp/releases).
 
-The scheduled `Upstream sync candidate` workflow checks upstream daily. When
-upstream has commits that are not in this fork's `main`, it creates or refreshes
-`automation/upstream-zisu17-main`, runs the locked offline test suite on Python
-3.11 and 3.13 with read-only permissions, and opens a pull request only after
-both test jobs pass.
+As authorized on 2026-10-07, `Automatic upstream sync` checks upstream daily at
+02:10 KST (GitHub schedules may be delayed). It imports runtime/package files and
+upstream tests from an immutable zisu17 main commit, preserving fork workflows,
+policy documents and fork-only tests. An unexpected local runtime patch, changed
+license, rewritten upstream history, conflicting test or version downgrade stops
+the sync for review. It does not overwrite such changes.
 
-The workflow never merges the pull request, publishes a package, changes the
-Legal Harness pin, deploys a server, or restarts production. A maintainer must
-review and merge the candidate, then update the Legal Harness commit and archive
-hash in a separate reviewed change.
+The candidate runs full-history release verification and locked offline tests on
+Python 3.11 and 3.13 in read-only jobs. After both pass, a separate trusted job
+records a PR, atomically fast-forwards unchanged main to the exact tested commit,
+and publishes an immutable `taxlab-v` release. Same-version runtime patches bump
+`.postN`; a new upstream version starts `.post1`. Missing release publication is
+retried on the next run. Existing tags are never moved. General correction PRs
+are outside this automation.
+
+The Legal Harness separately follows published releases at 02:40 KST, updates
+its immutable pin and hash, runs integration gates and verifies actual retrieval
+on GCE before activation. Its existing 03:30 KST email includes sync/deployment
+failures. No personal GitHub token is stored in the workflows or on GCE.
 
 If an equivalent downstream fix is accepted upstream, retain the regression
 test, remove only the redundant patch after comparison, and publish a new
