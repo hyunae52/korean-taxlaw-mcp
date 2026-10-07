@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import sys
 
 import httpx
@@ -74,11 +75,43 @@ async def test_mcp_reads_korean_pdf_and_binds_offsets_to_physical_pages(pdf_sour
     assert doc["attachment"]["downloadedBytes"] == len(pdf_source.data)
 
 
+async def test_supplementary_unicode_offsets_are_codepoints_not_utf16_units(pdf_source):
+    pdf_source.data = pdf_bytes(["가😀나", "끝"])
+    label, result = await call("get_tax_document", {"document_number": NUMBER})
+    assert label == "OK", result
+    doc = result["document"]
+    assert doc["fullText"] == "가😀나\n\n끝" and doc["offsetUnit"] == "unicode_codepoint"
+    assert [(p["start"], p["end"]) for p in doc["pages"]] == [(0, 3), (5, 6)]
+    assert len("가😀나".encode("utf-16-le")) // 2 == 4
+
+
 async def test_lookup_routes_audit_numbers_to_the_pdf_path(pdf_source):
     label, result = await call("lookup_tax_document", {"document_number": "2024 심사 636"})
     assert label == "OK", result
     assert result["exactMatch"] is True
     assert "심사청구를 기각" in result["document"]["fullText"]
+
+
+def test_oversized_audit_number_never_reaches_the_matcher(monkeypatch):
+    class RejectCalls:
+        def fullmatch(self, value):
+            raise AssertionError("Unbounded input reached the audit matcher")
+    monkeypatch.setattr(audit_pdf, "_NUMBER", RejectCalls())
+    assert audit_pdf.audit_number("2024" + " " * 100_000 + "X") is None
+
+
+async def test_oversized_audit_lookup_fails_before_source_search(monkeypatch):
+    async def reject(**kwargs):
+        raise AssertionError("Invalid audit number reached the source")
+    monkeypatch.setattr(audit_pdf, "search_special_documents", reject)
+    with pytest.raises(NtsError) as error:
+        await audit_pdf.get_audit_document("2024" + " " * 100_000 + "X")
+    assert error.value.code == ErrorCode.INVALID_INPUT
+
+
+@pytest.mark.parametrize("raw", ["2024심사636", "2024-심사-636", " 2024 - 심사 - 000636 "])
+def test_bounded_audit_number_keeps_supported_variants(raw):
+    assert audit_pdf.audit_number(raw) == NUMBER
 
 
 @pytest.mark.parametrize("args", [{"include_full_text": False}, {"detail": "compact"}])
@@ -131,6 +164,23 @@ async def test_contradictory_source_count_does_not_establish_a_unique_document(p
     pdf_source.total = 0
     label, result = await call("get_tax_document", {"document_number": NUMBER})
     assert label == "UPSTREAM_ERROR", result
+    assert pdf_source.downloads == 0
+
+
+async def test_raw_overfull_rows_cannot_hide_an_exact_duplicate(pdf_source):
+    first = dict(pdf_source.rows[0])
+    pdf_source.rows = [first] + [dict(first, ntstDcmDscmCntn=f"2024심사{700 + i}") for i in range(99)]
+    pdf_source.rows.append(dict(first, fleSn="969301"))
+    pdf_source.total = 100
+    label, result = await call("lookup_tax_document", {"document_number": NUMBER})
+    assert label == "UPSTREAM_ERROR", result
+    assert pdf_source.downloads == 0
+
+
+async def test_normal_empty_audit_search_is_still_not_found(pdf_source):
+    pdf_source.rows, pdf_source.total = [], 0
+    label, result = await call("lookup_tax_document", {"document_number": NUMBER})
+    assert label == "NOT_FOUND", result
     assert pdf_source.downloads == 0
 
 
@@ -200,6 +250,20 @@ async def test_mixed_text_and_unreadable_page_is_explicitly_partial(pdf_source):
     assert label == "OK", result
     assert result["document"]["bodyPartial"] is True
     assert result["document"]["pagesWithoutText"] == [2]
+
+
+@pytest.mark.parametrize("blank", ["", " " * 800], ids=["empty", "whitespace"])
+async def test_blank_leading_page_does_not_hide_a_later_long_text_page(pdf_source, blank):
+    pdf_source.data = pdf_bytes([blank, "가" * 800])
+    label, result = await call("get_tax_document", {"document_number": NUMBER, "body_limit": 500})
+    assert label == "OK", result
+    doc = result["document"]
+    assert doc["fullText"] == "가" * 500
+    assert doc["pagesWithoutText"] == [1]
+    assert doc["pages"][0]["start"] == doc["pages"][0]["end"] == 0
+    assert doc["pages"][1]["pageNumber"] == doc["nextPage"] == 2
+    assert doc["pages"][1]["truncated"] is True
+    assert doc["bodyPartial"] is True and doc["fullTextTruncated"] is True
 
 
 async def test_encrypted_pdf_returns_a_specific_limitation(pdf_source):
@@ -326,4 +390,100 @@ async def test_worker_spawn_failure_is_a_structured_error(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", denied)
     with pytest.raises(NtsError) as error:
         await audit_pdf._extract(pdf_bytes(["test"]), 1, None, 30000)
+    assert error.value.code == ErrorCode.PARSE_ERROR
+
+
+@pytest.mark.parametrize("mode", ["cancel", "timeout"])
+async def test_large_worker_output_is_reaped_and_pdf_slot_reusable(pdf_source, monkeypatch, mode):
+    created, handles = [], []
+    writing = asyncio.Event()
+    real_create = asyncio.create_subprocess_exec
+    real_reap = audit_pdf._reap_worker
+    cleanup_started, allow_cleanup = asyncio.Event(), asyncio.Event()
+
+    async def delayed_reap(process):
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        await real_reap(process)
+
+    async def output_worker(*args, **kwargs):
+        # An actual child writes well beyond a normal pipe's capacity, then
+        # remains live until the request's timeout/cancellation kills it.
+        handles.extend([kwargs["stdin"], kwargs["stdout"]])
+        process = await real_create(sys.executable, "-c",
+            "import sys,time; sys.stdout.buffer.write(b'x' * 700000); sys.stdout.buffer.flush(); time.sleep(30)",
+            **kwargs)
+        created.append(process)
+        async with asyncio.timeout(5):
+            while os.fstat(kwargs["stdout"].fileno()).st_size < 700000:
+                await asyncio.sleep(0.01)
+        writing.set()
+        return process
+
+    with monkeypatch.context() as patch:
+        patch.setattr(asyncio, "create_subprocess_exec", output_worker)
+        patch.setattr(audit_pdf, "_slots", asyncio.Semaphore(1))
+        if mode == "timeout":
+            patch.setattr(audit_pdf, "WORKER_TIMEOUT", 0.001)
+        else:
+            patch.setattr(audit_pdf, "_reap_worker", delayed_reap)
+        task = asyncio.create_task(audit_pdf.get_audit_document(NUMBER))
+        await asyncio.wait_for(writing.wait(), 5)
+        assert audit_pdf._slots.locked()
+        if mode == "cancel":
+            task.cancel()
+            await asyncio.wait_for(cleanup_started.wait(), 5)
+            task.cancel()  # A second cancellation must not release the slot early.
+            await asyncio.sleep(0)
+            assert not task.done() and audit_pdf._slots.locked()
+            allow_cleanup.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 8)
+        else:
+            with pytest.raises(NtsError) as error:
+                await asyncio.wait_for(task, 8)
+            assert error.value.code == ErrorCode.TIMEOUT
+        assert created[0].returncode is not None
+        assert all(handle.closed for handle in handles)
+        assert not audit_pdf._slots.locked()
+        patch.setattr(asyncio, "create_subprocess_exec", real_create)
+        patch.setattr(audit_pdf, "WORKER_TIMEOUT", 15)
+        patch.setattr(audit_pdf, "_reap_worker", real_reap)
+        doc = await audit_pdf.get_audit_document(NUMBER)
+        assert doc["bodyUnavailable"] is False
+
+
+async def test_normal_large_worker_result_is_returned_intact(monkeypatch):
+    real_create = asyncio.create_subprocess_exec
+
+    async def output_worker(*args, **kwargs):
+        return await real_create(sys.executable, "-c",
+            "import json,sys; sys.stdout.buffer.write(json.dumps({'ok':True,'result':{'fullText':'가'*200000}},ensure_ascii=False).encode('utf-8'))",
+            **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", output_worker)
+    assert (await audit_pdf._extract(b"input", 1, None, 200000))["fullText"] == "가" * 200000
+
+
+async def test_worker_cleanup_has_a_separate_deadline(monkeypatch):
+    class Stalled:
+        returncode = None
+        killed = False
+        def kill(self):
+            self.killed = True
+        async def wait(self):
+            await asyncio.Event().wait()
+    process = Stalled()
+    monkeypatch.setattr(audit_pdf, "WORKER_CLEANUP_TIMEOUT", 0.001)
+    with pytest.raises(NtsError) as error:
+        await audit_pdf._reap_worker(process)
+    assert error.value.code == ErrorCode.TIMEOUT and process.killed
+
+
+async def test_unavailable_temporary_storage_is_a_structured_error(monkeypatch):
+    def denied():
+        raise PermissionError("test")
+    monkeypatch.setattr(audit_pdf, "TemporaryFile", denied)
+    with pytest.raises(NtsError) as error:
+        await audit_pdf._extract(b"input", 1, None, 30000)
     assert error.value.code == ErrorCode.PARSE_ERROR

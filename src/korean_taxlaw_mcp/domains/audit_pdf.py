@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import sys
+from tempfile import TemporaryFile
 from typing import Any
 
 import httpx
@@ -20,10 +21,17 @@ from ..rate_limit import upstream_limiter
 from .special import AUDIT_APPEAL, AUDIT_APPEAL_LIST_URL, attachment_url, search_special_documents
 
 _NUMBER = re.compile(r"([0-9]{4})\s*-?\s*(심사|감심)\s*-?\s*([0-9]{1,6})")
+MAX_AUDIT_NUMBER_CHARS = 64
+WORKER_CLEANUP_TIMEOUT = 5
+MAX_WORKER_OUTPUT_BYTES = 2 * 1024 * 1024
 _slots = asyncio.Semaphore(2)
 
 
 def audit_number(value: str | None) -> str | None:
+    # Bound work before strip/fullmatch; this is only the audit-format detector.
+    # Longer ordinary document numbers still belong to the existing lookup path.
+    if value is None or len(value) > MAX_AUDIT_NUMBER_CHARS:
+        return None
     match = _NUMBER.fullmatch((value or "").strip())
     return f"{match[1]}{match[2]}{int(match[3])}" if match else None
 
@@ -70,35 +78,79 @@ async def _download(url: str) -> bytes:
     return bytes(data)
 
 
-async def _extract(data: bytes, page_start: int, page_end: int | None, body_limit: int) -> dict[str, Any]:
-    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+async def _reap_worker(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
     try:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-I", "-m", "korean_taxlaw_mcp.pdf_text", str(page_start), str(page_end or 0), str(body_limit),
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, **options,
-        )
-    except OSError as exc:
-        raise NtsError(ErrorCode.PARSE_ERROR, "PDF 처리 프로세스를 시작하지 못했습니다.") from exc
-    try:
-        stdout, _ = await asyncio.wait_for(process.communicate(data), WORKER_TIMEOUT)
-        if process.returncode:
-            raise NtsError(ErrorCode.PARSE_ERROR, "PDF 처리 프로세스가 종료됐습니다. 본문은 확보하지 못했습니다.")
-        payload = json.loads(stdout)
-        if not payload.get("ok"):
-            error = payload["error"]
-            raise NtsError(ErrorCode(error["code"]), error["message"], detail=error.get("detail"))
-        return payload["result"]
+        await asyncio.wait_for(process.wait(), WORKER_CLEANUP_TIMEOUT)
     except TimeoutError as exc:
-        raise NtsError(ErrorCode.TIMEOUT, "PDF 본문 추출 시간이 초과됐습니다.") from exc
-    except (ValueError, KeyError, TypeError) as exc:
-        raise NtsError(ErrorCode.PARSE_ERROR, "PDF 처리 결과를 확인하지 못했습니다.") from exc
-    finally:
-        if process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            await process.wait()
+        raise NtsError(ErrorCode.TIMEOUT, "PDF 처리 프로세스 종료 확인 시간이 초과됐습니다.") from exc
+
+
+async def _extract(data: bytes, page_start: int, page_end: int | None, body_limit: int) -> dict[str, Any]:
+    try:
+        return await _extract_with_files(data, page_start, page_end, body_limit)
+    except OSError as exc:
+        raise NtsError(ErrorCode.PARSE_ERROR, "PDF 처리용 임시 파일을 사용할 수 없습니다.") from exc
+
+
+async def _extract_with_files(data: bytes, page_start: int, page_end: int | None, body_limit: int) -> dict[str, Any]:
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+    # No subprocess PIPE: cancellation cannot leave a paused stdout reader
+    # holding Process.wait() open. Both anonymous files are closed on every exit.
+    # Worker output is bounded JSON (<= 200k chars plus page metadata).
+    with TemporaryFile() as source, TemporaryFile() as output:
+        source.write(data)
+        source.seek(0)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", "-m", "korean_taxlaw_mcp.pdf_text", str(page_start), str(page_end or 0), str(body_limit),
+                stdin=source, stdout=output, stderr=asyncio.subprocess.DEVNULL, **options,
+            )
+        except OSError as exc:
+            raise NtsError(ErrorCode.PARSE_ERROR, "PDF 처리 프로세스를 시작하지 못했습니다.") from exc
+        cancelled = False
+        try:
+            await asyncio.wait_for(process.wait(), WORKER_TIMEOUT)
+            if process.returncode:
+                raise NtsError(ErrorCode.PARSE_ERROR, "PDF 처리 프로세스가 종료됐습니다. 본문은 확보하지 못했습니다.")
+            output.seek(0)
+            stdout = output.read(MAX_WORKER_OUTPUT_BYTES + 1)
+            if len(stdout) > MAX_WORKER_OUTPUT_BYTES:
+                raise NtsError(ErrorCode.PARSE_ERROR, "PDF 처리 결과가 크기 상한을 초과했습니다.")
+            payload = json.loads(stdout)
+            if not isinstance(payload, dict):
+                raise ValueError("Invalid worker envelope")
+            if not payload.get("ok"):
+                error = payload["error"]
+                raise NtsError(ErrorCode(error["code"]), error["message"], detail=error.get("detail"))
+            if not isinstance(payload.get("result"), dict):
+                raise ValueError("Invalid worker result")
+            return payload["result"]
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except TimeoutError as exc:
+            raise NtsError(ErrorCode.TIMEOUT, "PDF 본문 추출 시간이 초과됐습니다.") from exc
+        except (ValueError, KeyError, TypeError) as exc:
+            raise NtsError(ErrorCode.PARSE_ERROR, "PDF 처리 결과를 확인하지 못했습니다.") from exc
+        finally:
+            cleanup = asyncio.create_task(_reap_worker(process))
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    # Repeated request cancellation must not cancel cleanup.
+                    cancelled = True
+                except Exception:
+                    break  # Retrieve and propagate below, unless preserving cancellation.
+            if cancelled:
+                cleanup.exception()
+                raise asyncio.CancelledError
+            cleanup.result()
 
 
 async def get_audit_document(document_number: str, *, include_full_text: bool = True,
@@ -112,7 +164,8 @@ async def get_audit_document(document_number: str, *, include_full_text: bool = 
         raise NtsError(ErrorCode.INVALID_INPUT, "PDF는 한 번에 최대 20페이지를 조회합니다.")
     if not include_full_text and (page_start != 1 or page_end is not None):
         raise NtsError(ErrorCode.INVALID_INPUT, "본문을 생략할 때 페이지 범위를 지정할 수 없습니다.")
-    listing = await search_special_documents(doc_class=AUDIT_APPEAL, query=number, limit=100)
+    listing = await search_special_documents(doc_class=AUDIT_APPEAL, query=number, limit=100,
+                                             validate_raw_rows=True)
     if listing["total"] > len(listing["items"]):
         raise NtsError(ErrorCode.LOOKUP_INCOMPLETE, "감사원 결정번호 검색 결과를 끝까지 확인하지 못했습니다.")
     if listing["total"] < len(listing["items"]):

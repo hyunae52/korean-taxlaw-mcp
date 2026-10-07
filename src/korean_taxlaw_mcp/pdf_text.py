@@ -53,9 +53,13 @@ def extract_pdf(data: bytes, page_start: int, page_end: int | None, body_limit: 
     for number in range(page_start, end + 1):
         # A single parser failure invalidates this extraction, not just that page.
         text = reader.pages[number - 1].extract_text() or ""
+        # Blank pages retain provenance but must not consume the text budget or
+        # prevent the first readable page from being returned in part.
+        if not text.strip():
+            text = ""
         separator = "\n\n" if chunks else ""
         available = max(0, body_limit - length - (len(separator) if text else 0))
-        if text and len(text) > available and pages:
+        if text and len(text) > available and chunks:
             next_page, cut = number, True
             break
         truncated = len(text) > available

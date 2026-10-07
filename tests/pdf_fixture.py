@@ -8,8 +8,9 @@ from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, Na
 def pdf_bytes(texts: list[str], *, encrypted: bool = False) -> bytes:
     writer = PdfWriter()
     chars = sorted(set("".join(texts)))
+    codes = {char: index + 1 for index, char in enumerate(chars)}
     cmap = DecodedStreamObject()
-    entries = "\n".join(f"<{ord(c):04x}> <{ord(c):04x}>" for c in chars)
+    entries = "\n".join(f"<{codes[c]:04x}> <{c.encode('utf-16-be').hex()}>" for c in chars)
     cmap.set_data(("/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
                    "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n"
                    "/CMapName /TestUnicode def /CMapType 2 def\n"
@@ -29,7 +30,8 @@ def pdf_bytes(texts: list[str], *, encrypted: bool = False) -> bytes:
         page = writer.add_blank_page(width=612, height=792)
         page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})})
         stream = DecodedStreamObject()
-        stream.set_data(f"BT /F1 12 Tf 40 700 Td <{text.encode('utf-16-be').hex()}> Tj ET".encode("ascii"))
+        encoded = "".join(f"{codes[char]:04x}" for char in text)
+        stream.set_data(f"BT /F1 12 Tf 40 700 Td <{encoded}> Tj ET".encode("ascii"))
         page[NameObject("/Contents")] = writer._add_object(stream)
     if encrypted:
         writer.encrypt("test-password")

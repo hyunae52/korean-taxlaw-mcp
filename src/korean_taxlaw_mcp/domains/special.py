@@ -211,6 +211,7 @@ async def search_special_documents(
     date_to: str | None = None,
     page: int = 1,
     limit: int = 20,
+    validate_raw_rows: bool = False,
 ) -> dict[str, Any]:
     """11·13·14 목록 검색. 반환 형태는 ``search_documents`` 와 맞춘다.
 
@@ -258,6 +259,11 @@ async def search_special_documents(
         raise upstream("검색 응답의 목록 형식이 잘못됐습니다.", actionId=action_id)
     if not rows and total > (page - 1) * limit:
         raise upstream("검색 건수와 빈 목록이 일치하지 않습니다.", actionId=action_id, page=page)
+    # Audit exact lookup relies on these rows as identity evidence. Never hide
+    # contradictory or overfull raw rows behind the presentation slice below.
+    if validate_raw_rows and (len(rows) > limit or len(rows) > max(0, total - (page - 1) * limit)):
+        raise upstream("감사원 검색 원본 행 수가 건수 또는 페이지 상한과 일치하지 않습니다.",
+                       actionId=action_id, page=page)
     level = str(authority_for_doc_class(doc_class))
     items = [_row_to_item(doc_class, row, level) for row in rows[:limit]]
 

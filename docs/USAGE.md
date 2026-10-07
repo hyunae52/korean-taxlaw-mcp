@@ -98,6 +98,9 @@ get_tax_document(document_number="2024-심사-636", page_start=2, page_end=4)
   `completeness`는 항상 `unverified`입니다. 필요한 표와 원문 표현은 PDF를 대조하세요.
 - `include_full_text=false` 또는 `detail="compact"`는 PDF를 다운로드하지 않고 메타데이터만
   반환합니다. 이 경우 페이지 범위를 지정할 수 없습니다.
+- 파서는 별도 프로세스에서 실행합니다. 입출력은 쓰기 가능한 시스템 임시 폴더의 임시
+  파일을 사용하고 작업 종료 시 닫아 삭제합니다. 취소·시간 초과 시에도 파서를 종료하며,
+  종료 확인에는 별도 5초 상한을 둡니다. 임시 저장소를 사용할 수 없으면 추출 오류를 반환합니다.
 - 스캔본처럼 텍스트를 전혀 얻지 못한 경우, 암호화 PDF, HWP/HWPX는
   `DETAIL_NOT_AVAILABLE`과 원문 주소·사유를 반환합니다. PDF 대신 오류 HTML이 내려오면
   `UPSTREAM_ERROR`, 손상된 PDF는 `PARSE_ERROR`입니다. 어느 것도 자료 부존재를 뜻하지 않습니다.
