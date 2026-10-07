@@ -68,6 +68,45 @@
 감사원 본문은 첨부 파일로만 제공되며 `attachment_status=true`는 파일 앞부분의 서명만
 확인합니다. 전체 파일 검증이나 본문 추출을 의미하지 않습니다.
 
+## 감사원 PDF 본문 조회
+
+검색에서 확인한 감사원 결정번호를 본문 조회에 전달합니다. 도구를 새로 추가하지 않고
+기존 `lookup_tax_document`와 `get_tax_document`를 사용합니다.
+
+```python
+lookup_tax_document(document_number="2024심사636")
+get_tax_document(document_number="2024-심사-636", page_start=2, page_end=4)
+```
+
+- 원본 검색에서 결정번호가 정확하고 유일하게 일치하는 경우에만 그 행의 첨부를 읽습니다.
+  감사원 번호는 연도 다음에 `심사` 또는 `감심`이 오는 형식입니다. 다른 번호 체계의 기존
+  상세 조회 경로는 유지합니다. 감사원 조회는 `context_query`를 지원하지 않습니다.
+- `fullText`는 PDF 텍스트 레이어의 추출 결과입니다. `pages`의 `pageNumber`는 실제 PDF
+  페이지 번호(1부터)이며, 인쇄된 문서 쪽수와 다를 수 있습니다. 각 페이지의 `sourceUrl`에
+  `#page=N`이 붙습니다. `start`(포함)·`end`(제외)는 `fullText` 내 **유니코드 코드 포인트**
+  위치입니다. JavaScript의 UTF-16 인덱스와는 보충 문자에서 차이가 납니다.
+- `attachment.sha256`, `attachment.downloadedBytes`, `retrievedAt`로 어떤 파일을 언제
+  읽었는지 확인합니다. 해시는 다운로드한 바이트의 식별값이지 법적 진위 검증이 아닙니다.
+- 한 번에 최대 20페이지, 기본 30,000자(`body_limit`으로 최대 200,000자)를 반환합니다.
+  `nextPage`가 있으면 그 페이지부터 다시 요청합니다. 한 페이지 자체가 글자 제한을 넘으면
+  그 페이지가 잘렸다고 표시하고 `nextPage`에 같은 페이지를 줍니다. 이 경우 그 페이지만
+  더 큰 `body_limit`으로 조회하세요. `page_end`를 생략하면 시작점부터 최대 20페이지입니다.
+- `bodyPartial=true`는 일부 페이지만 요청했거나, 글자 제한 또는 읽지 못한 페이지가 있음을
+  뜻합니다. `fullTextTruncated`는 글자 제한 여부이고 `pagesWithoutText`는 텍스트를 얻지
+  못한 페이지입니다. 일부 페이지만 읽고 결정문 전체를 확인했다고 표현하지 마세요.
+- `bodyPartial=false`여도 이미지 속 글자·표 읽기 순서·인코딩 정확성이 확인된 것은 아닙니다.
+  `completeness`는 항상 `unverified`입니다. 필요한 표와 원문 표현은 PDF를 대조하세요.
+- `include_full_text=false` 또는 `detail="compact"`는 PDF를 다운로드하지 않고 메타데이터만
+  반환합니다. 이 경우 페이지 범위를 지정할 수 없습니다.
+- 스캔본처럼 텍스트를 전혀 얻지 못한 경우, 암호화 PDF, HWP/HWPX는
+  `DETAIL_NOT_AVAILABLE`과 원문 주소·사유를 반환합니다. PDF 대신 오류 HTML이 내려오면
+  `UPSTREAM_ERROR`, 손상된 PDF는 `PARSE_ERROR`입니다. 어느 것도 자료 부존재를 뜻하지 않습니다.
+
+다운로드는 8 MiB, PDF 전체는 200페이지로 제한합니다. 파서는 별도 프로세스에서 실행되고
+15초가 지나거나 요청이 취소되면 종료됩니다. 동시에 최대 두 건만 PDF를 처리합니다.
+Linux에서는 추가로 프로세스 주소 공간 384 MiB·CPU 10초를 제한합니다.
+기존 검색과 첨부의 4 KiB 확인은 본문을 자동 다운로드하지 않습니다.
+
 ## 근거 유형
 
 | 값 | 의미 |
@@ -89,7 +128,7 @@
 | `NOT_FOUND` | 원본에 일치하는 자료가 없음 |
 | `AMBIGUOUS_DOCUMENT_NUMBER` | 같은 문서번호가 여러 건이라 하나를 확정할 수 없음 |
 | `LOOKUP_INCOMPLETE` | 후보 검색 한도에 도달해 문서번호의 유일성·부존재를 확정하지 못함 |
-| `DETAIL_NOT_AVAILABLE` | 문서는 있지만 원본에서 본문을 제공하지 않음 |
+| `DETAIL_NOT_AVAILABLE` | 문서는 있지만 본문을 확보하지 못함(원본 미제공·추출 미지원·처리 상한 등) |
 | `UPSTREAM_ERROR` | 원본 사이트 오류·점검·비정상 응답 |
 | `RATE_LIMITED` | 요청 보호 한도 초과 또는 냉각 상태 |
 | `TIMEOUT` | 원본 사이트 응답 시간 초과 |

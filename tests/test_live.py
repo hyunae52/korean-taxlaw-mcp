@@ -497,6 +497,28 @@ async def test_special_live_audit_attachment():
     assert attachment["availabilityCheck"] == "file_signature_prefix_only"
 
 
+async def test_special_live_audit_pdf_body_and_page_range():
+    label, result = await call("get_tax_document", {"document_number": "2024심사636"})
+    assert label == "OK", result
+    document = result["document"]
+    assert document["documentNumber"] == "2024심사636"
+    assert document["pageCount"] >= 2 and document["bodyUnavailable"] is False
+    assert len(document["fullText"]) > 1000
+    assert "심사청구" in document["fullText"]
+    assert len(document["attachment"]["sha256"]) == 64
+    assert document["completeness"] == "unverified"
+    label, selected = await call("get_tax_document", {
+        "document_number": "2024심사636", "page_start": 2, "page_end": 2,
+    })
+    assert label == "OK", selected
+    page = document["pages"][1]
+    second = selected["document"]
+    assert second["attachment"]["sha256"] == document["attachment"]["sha256"]
+    assert second["fullText"] == document["fullText"][page["start"]:page["end"]]
+    assert second["bodyPartial"] is True
+    assert [p["pageNumber"] for p in second["pages"]] == [2]
+
+
 @pytest.mark.parametrize("tool,kind,query", [
     ("search_tax_interpretations", "curated_issue", "상속"),
     ("search_tax_decisions", "audit_appeal", "법인세"),

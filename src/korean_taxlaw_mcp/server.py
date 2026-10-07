@@ -31,6 +31,7 @@ from .domains.documents import (
     search_documents,
 )
 from .domains.forms import search_forms
+from .domains.audit_pdf import audit_number, get_audit_document
 from .domains.guidance import (
     get_basic_rulings,
     get_execution_standards,
@@ -71,7 +72,8 @@ mcp = FastMCP(
         "취득세·재산세·자동차세·주민세·지방소득세·등록면허세 등은 **지방세**이므로 "
         "search_local_tax_* 를 쓰고, 양도소득세·법인세·부가가치세·상속증여세 등은 국세 도구를 씁니다.\n"
         "법률·시행령·시행규칙 본문은 다루지 않습니다(법제처 기반 korean-law-mcp 사용). "
-        "문서번호를 알고 있으면 항상 lookup 도구를 먼저 쓰세요. "
+        "문서번호를 알고 있으면 항상 lookup 도구를 먼저 쓰세요. 감사원 결정번호(2024심사636 등)는 "
+        "lookup_tax_document로 PDF 본문을 조회하고, 이어 읽기는 get_tax_document의 page_start/page_end를 쓰세요. "
         "조회 결과에 없는 내용은 절대 추측·생성하지 마세요."
     ),
 )
@@ -305,6 +307,7 @@ async def _run_special_search(
         "본문까지 반환한다. 표기 편차('서면 2026 법규재산 0119' 등)는 자동 정규화한다. "
         "동일 번호가 여러 건이면 context_query로 주제를 구분하며, 확정할 수 없으면 "
         "AMBIGUOUS_DOCUMENT_NUMBER를 반환한다. "
+        "감사원 결정번호(2024심사636·2011감심200)는 첨부 PDF의 텍스트를 읽는다(HWP·OCR 미지원). "
         "없으면 NOT_FOUND — similarDocuments 는 번호가 일부 겹치는 별개 문서이며 정답이 아니다. "
         "문서번호를 아는 경우 검색 대신 항상 이 도구를 먼저 쓸 것."
     ),
@@ -327,6 +330,14 @@ async def lookup_tax_document(
         Field(description="full(기본)=절 전체 | compact=요지·회신·결론만(사실관계·주장·이유 절 생략)"),
     ] = "full",
 ) -> str:
+    if audit_number(document_number):
+        if context_query is not None:
+            raise NtsError(ErrorCode.INVALID_INPUT, "감사원 결정번호 조회는 context_query를 지원하지 않습니다.")
+        document = await get_audit_document(
+            document_number, include_full_text=include_full_text and detail == "full", body_limit=body_limit,
+        )
+        return _ok({"found": True, "exactMatch": True,
+                    "normalizedDocumentNumber": audit_number(document_number), "document": document})
     outcome = await lookup_by_document_number(
         document_number,
         context_query=context_query,
@@ -467,7 +478,8 @@ async def search_tax_interpretations(
         "국세청·조세심판원·법원의 판례·결정례(과세적부·이의신청·심사청구·심판청구·판례·헌재)를 "
         "검색한다. type='audit_appeal'(11 감사원 심사청구)·'taxpayer_protection'(14 납세자보호위원회 "
         "심의사례)은 원본이 별도 모듈로 제공하는 문서구분이다 — 감사원 심사청구는 본문이 없고 "
-        "첨부 PDF/HWP 로만 존재한다(attachment_status=true 로 파일 서명 앞부분 확인, 전체 파일 검증 아님). "
+        "첨부 PDF/HWP 로만 존재한다(attachment_status=true 는 파일 앞부분 확인만 수행). "
+        "감사원 PDF 본문은 get_tax_document(document_number=결정번호)로 읽는다(HWP·OCR 미지원). "
         "11·14는 일반 텍스트 query·날짜만 지원하며 OR·제외어·정렬·세목 필터는 지원하지 않는다. "
         "11의 결정번호는 query에 넣는다. 11·14에서는 case_number exact lookup을 지원하지 않는다. "
         "결과는 본문 없는 후보 목록 — 필요한 문서만 get_tax_document 로 조회할 것. "
@@ -584,6 +596,9 @@ async def search_tax_decisions(
         "국세청 문서 1건의 본문을 가져온다. ntst_dcm_id(검색 결과의 ID) 또는 document_number 로 "
         "지정한다. 본문은 절(사실관계·질의·회신·주장·판단·결론 등)로 분해되며, 절 분해가 "
         "본문을 다 담지 못할 때만 fullText 가 추가된다. 없는 절은 생략된다. "
+        "감사원 결정번호(2024심사636 등)는 PDF 텍스트를 fullText와 페이지별 위치·출처로 반환한다. "
+        "PDF는 page_start/page_end로 최대 20페이지씩 읽고 nextPage가 있으면 이어 조회한다. "
+        "스캔본 OCR·HWP는 미지원이며 compact는 PDF를 읽지 않고 메타데이터만 반환한다. "
         "본문을 원본이 주지 않으면 DETAIL_NOT_AVAILABLE 로 알리고 본문을 생성하지 않는다."
     ),
 )
@@ -597,7 +612,19 @@ async def get_tax_document(
         Literal["full", "compact"],
         Field(description="full(기본)=절 전체 | compact=요지·회신·결론만(사실관계·주장·이유 절 생략)"),
     ] = "full",
+    page_start: Annotated[int, Field(ge=1, le=200, description="감사원 PDF 시작 페이지(실제 PDF 쪽수, 1부터)")] = 1,
+    page_end: Annotated[int | None, Field(ge=1, le=200, description="감사원 PDF 끝 페이지. 최대 20페이지, 생략하면 20페이지씩.")] = None,
 ) -> str:
+    if audit_number(document_number):
+        if ntst_dcm_id:
+            raise NtsError(ErrorCode.INVALID_INPUT, "감사원 결정번호와 일반 문서 ID를 함께 지정할 수 없습니다.")
+        document = await get_audit_document(
+            document_number or "", include_full_text=include_full_text and detail == "full", body_limit=body_limit,
+            page_start=page_start, page_end=page_end,
+        )
+        return _ok({"document": document})
+    if page_start != 1 or page_end is not None:
+        raise NtsError(ErrorCode.INVALID_INPUT, "page_start/page_end는 감사원 PDF 본문 조회 전용입니다.")
     if not (ntst_dcm_id or document_number):
         raise NtsError(
             ErrorCode.INVALID_INPUT, "ntst_dcm_id 또는 document_number 중 하나는 필요합니다."

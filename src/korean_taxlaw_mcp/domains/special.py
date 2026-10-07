@@ -4,7 +4,7 @@
 액션을 공유한다(:mod:`~korean_taxlaw_mcp.domains.documents`). 아래 세 문서구분은 그
 경로를 타지 않는다.
 
-* ``11`` 감사원 심사청구 — 전용 검색 액션만 있고 **본문이 없다**. 본문은 첨부 PDF/HWP
+* ``11`` 감사원 심사청구 — 전용 검색 액션만 있고 **HTML 본문이 없다**. 본문은 첨부 PDF/HWP
   이며, 원본 스토리지에 파일이 없으면 서버가 자기 404 페이지를 ``Content-Disposition``
   과 함께 돌려준다(:data:`ATTACHMENT_STORAGE_GAP_NOTE`).
 * ``13`` 자주찾는 쟁점별 사례 — 큐레이션된 해석례. 전용 검색 액션과 쟁점 분류가 있고,
@@ -277,7 +277,8 @@ async def search_special_documents(
         out["bodyNote"] = (
             "감사원 심사청구는 사이트가 본문을 HTML 로 제공하지 않습니다. 본문은 행의 "
             "attachment(첨부 PDF/HWP)에만 있고, 일부 조사 표본은 파일 대신 오류 HTML을 반환했습니다. "
-            "attachment_status=true 로 행별 확보 여부를 확인할 수 있습니다."
+            "attachment_status=true 로 행별 확보 여부를 확인할 수 있습니다. PDF 본문은 "
+            "get_tax_document(document_number=결정번호)로 읽습니다. HWP와 OCR은 지원하지 않습니다."
         )
     elif doc_class == TAXPAYER_PROTECTION:
         out["note"] = "본문은 get_tax_document(ntst_dcm_id)로 조회합니다."

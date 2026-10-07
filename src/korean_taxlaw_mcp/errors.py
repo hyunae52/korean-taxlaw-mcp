@@ -18,7 +18,7 @@ class ErrorCode(StrEnum):
     AMBIGUOUS_DOCUMENT_NUMBER = "AMBIGUOUS_DOCUMENT_NUMBER"
     #: 후보 검색 한도에 도달해 문서번호의 유일성·부존재를 확정하지 못했다.
     LOOKUP_INCOMPLETE = "LOOKUP_INCOMPLETE"
-    #: 문서는 찾았으나 본문을 원본이 제공하지 않는다. 부존재 주장 아님.
+    #: 문서는 찾았으나 본문을 확보하지 못했다(미제공·추출 미지원·처리 상한). 부존재 주장 아님.
     DETAIL_NOT_AVAILABLE = "DETAIL_NOT_AVAILABLE"
     #: 국세법령정보시스템이 오류·점검·비정상 응답을 반환. 부존재 주장 아님.
     UPSTREAM_ERROR = "UPSTREAM_ERROR"
