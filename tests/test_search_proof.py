@@ -103,3 +103,5 @@ async def test_bad_http_200_is_never_not_found(monkeypatch, body):
         label, data = await call("search_tax_interpretations", {"query": "probe"})
     assert label in {"PARSE_ERROR", "UPSTREAM_ERROR"}
     assert "searchProof" not in data["error"].get("detail", {})
+    if '"status": "FAILURE"' in body:
+        assert label == "UPSTREAM_ERROR"
