@@ -63,6 +63,41 @@ def test_counts_rows_and_page_are_consistent():
     assert inspect_list(payload, {"001_02"}, 1, 2)["status"] == "partial"
 
 
+@pytest.mark.parametrize("facet_count", [None, "0"])
+def test_rows_in_omitted_or_zero_class_are_rejected(facet_count):
+    payload = positive()
+    payload["body"][0]["dcm"]["NTST_DCM_CL_CD"] = "01"
+    if facet_count is not None:
+        payload["top"][0]["categoryMap"]["SUB_ID_CATEGORY"].append({"name": "001_01", "count": facet_count})
+    with pytest.raises(NtsError):
+        inspect_list(payload, {"001_01", "001_02"}, 1, 2)
+
+
+def test_class_unique_counts_cannot_exceed_facets_despite_correct_total():
+    payload = positive()
+    payload["top"][0]["categoryMap"]["SUB_ID_CATEGORY"].append({"name": "001_01", "count": "1"})
+    payload["body"].append(deepcopy(payload["body"][0]))
+    payload["body"][1]["dcm"]["DOC_ID"] = "200000000000000099"
+    with pytest.raises(NtsError):
+        inspect_list(payload, {"001_01", "001_02"}, 1, 2)
+    payload["body"][1]["dcm"]["NTST_DCM_CL_CD"] = "01"
+    assert inspect_list(payload, {"001_01", "001_02"}, 1, 2)["status"] == "found"
+    payload["body"][1] = deepcopy(payload["body"][0])
+    assert inspect_list(payload, {"001_01", "001_02"}, 1, 2)["status"] == "partial"
+
+
+async def test_class_contradiction_is_opt_in_parse_error_at_tool_boundary(upstream, monkeypatch):
+    payload = positive()
+    payload["body"][0]["dcm"]["NTST_DCM_CL_CD"] = "01"
+    upstream.search_payload["class-conflict"] = payload
+    label, _ = await call("search_tax_interpretations", {"query": "class-conflict", "type": "all", "limit": 2})
+    assert label == "OK"
+    monkeypatch.setenv("TAXLAW_SEARCH_PROOF_V1", "1")
+    label, data = await call("search_tax_interpretations", {"query": "class-conflict", "type": "all", "limit": 2})
+    assert label == "PARSE_ERROR"
+    assert "searchProof" not in data["error"].get("detail", {})
+
+
 @pytest.mark.parametrize("tool,kind", [("search_tax_interpretations", "written"), ("search_tax_decisions", "court")])
 async def test_mcp_empty_proof_is_opt_in_and_keeps_legacy_error_code(upstream, monkeypatch, tool, kind):
     upstream.search_payload["probe"] = empty()

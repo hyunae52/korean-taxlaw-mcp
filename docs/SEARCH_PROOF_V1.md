@@ -12,6 +12,9 @@ explicit total: omitted classes have no hits. In particular, an empty category
 array plus an empty body is the real zero-result form. Missing structure is not
 equivalent to this form. Invalid counts, invalid row identities, contradictory
 counts and an empty in-range page raise PARSE_ERROR.
+Each returned class's unique document count must also fit its own facet count;
+a row in an omitted/zero class is contradictory even when the overall sum fits.
+Duplicate rows still produce partial proof rather than complete-page evidence.
 
 `tests/fixtures/search_empty_question_v1.json.gz` and
 `search_empty_precedent_v1.json.gz` were captured from the public action on

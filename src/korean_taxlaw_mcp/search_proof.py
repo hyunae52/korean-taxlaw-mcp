@@ -45,6 +45,7 @@ def inspect_list(payload: Any, wanted: set[str], page: int, limit: int) -> dict[
         counts[name] = int(count)
     total = sum(counts.get(name, 0) for name in wanted)
     ids: list[str] = []
+    class_ids: dict[str, set[str]] = {}
     for row in body:
         if not isinstance(row, dict) or not isinstance(row.get("dcm"), dict):
             invalid()
@@ -53,6 +54,11 @@ def inspect_list(payload: Any, wanted: set[str], page: int, limit: int) -> dict[
         if not isinstance(doc_id, str) or not re.fullmatch(r"\d{18}", doc_id) or f"001_{doc_class}" not in wanted:
             invalid()
         ids.append(doc_id)
+        class_ids.setdefault(f"001_{doc_class}", set()).add(doc_id)
+    # Sparse omitted classes mean zero, so their rows cannot be certified.
+    # Use unique IDs here: duplicate rows retain the existing partial policy.
+    if any(len(doc_ids) > counts.get(name, 0) for name, doc_ids in class_ids.items()):
+        invalid()
     count = len(body)
     expected = min(limit, max(0, total - (page - 1) * limit))
     if count > limit or count > total or (expected > 0 and count == 0) or (expected == 0 and count != 0):
