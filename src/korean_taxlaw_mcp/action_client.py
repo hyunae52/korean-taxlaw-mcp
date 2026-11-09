@@ -147,6 +147,7 @@ async def call_action(
     referer: str | None = None,
     ttl: float | None = None,
     cache_key: str | None = None,
+    strict_envelope: bool = False,
 ) -> Any:
     """액션 호출 + 봉투 해체.
 
@@ -157,6 +158,8 @@ async def call_action(
 
     async def run() -> Any:
         envelope = await _post_action(action_id, param_data, ref)
+        if strict_envelope and not isinstance(envelope, dict):
+            raise NtsError(ErrorCode.PARSE_ERROR, "국세청 검색의 정상 응답 봉투를 확인하지 못했습니다.")
         status = envelope.get("status")
         if status and status != "SUCCESS":
             raise upstream(
@@ -165,6 +168,8 @@ async def call_action(
                 actionId=action_id,
                 status=status,
             )
+        if strict_envelope and (status != "SUCCESS" or not isinstance(envelope.get("data"), dict)):
+            raise NtsError(ErrorCode.PARSE_ERROR, "국세청 검색의 정상 응답 봉투를 확인하지 못했습니다.")
         data = envelope.get("data") or {}
         if action_id not in data:
             raise NtsError(
@@ -176,6 +181,8 @@ async def call_action(
 
     if ttl and ttl > 0:
         key = cache_key or f"{action_id}:{json.dumps(param_data, sort_keys=True, ensure_ascii=False)}"
+        if strict_envelope:
+            key = "strict-envelope-v1:" + key
         return await cache.wrap(key, ttl, run)
     return await run()
 
