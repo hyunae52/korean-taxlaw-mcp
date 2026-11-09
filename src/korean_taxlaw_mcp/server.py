@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from .search_proof import enabled as search_proof_enabled, bind_scope
+
 import asyncio
 import functools
 import json
@@ -441,7 +443,11 @@ async def search_tax_interpretations(
         doc_classes=classes, query=merged, match=match, exclude=exclude,
         tax_type_codes=codes, date_from=date_from, date_to=date_to,
         sort=sort, page=page, limit=limit,
+        verify_response=search_proof_enabled(),
     )
+    proof = bind_scope(result, unresolved)
+    if proof is not None:
+        result["searchProof"] = proof
     if not result["items"]:
         raise not_found(
             f"세법해석례 검색 결과가 없습니다 (query={merged!r}).",
@@ -450,6 +456,7 @@ async def search_tax_interpretations(
                 "match='any' 로 바꾸면 낱말 중 하나만 포함된 문서도 찾습니다.",
                 *([f"인식하지 못한 세목: {', '.join(unresolved)}"] if unresolved else []),
             ],
+            **({"searchProof": proof} if proof is not None else {}),
         )
     payload: dict[str, Any] = {"domain": "interpretation", **result}
     if unresolved:
@@ -559,7 +566,11 @@ async def search_tax_decisions(
         tax_type_codes=codes, decision_result_codes=result_codes,
         attribution_year=attribution_year, date_from=date_from, date_to=date_to,
         sort=sort, page=page, limit=limit,
+        verify_response=search_proof_enabled(),
     )
+    proof = bind_scope(found, unresolved)
+    if proof is not None:
+        found["searchProof"] = proof
     if not found["items"]:
         raise not_found(
             f"판례·결정례 검색 결과가 없습니다 (query={merged!r}).",
@@ -567,6 +578,7 @@ async def search_tax_decisions(
                 "키워드를 줄이거나 match='any' 를 시도하세요.",
                 *([f"인식하지 못한 세목: {', '.join(unresolved)}"] if unresolved else []),
             ],
+            **({"searchProof": proof} if proof is not None else {}),
         )
     payload: dict[str, Any] = {"domain": "decision", **found}
     if unresolved:

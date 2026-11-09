@@ -28,6 +28,7 @@ from ..html_text import attach_full_text, parse_body_html, strip_highlight, trun
 from ..model import AUTHORITY_LABEL, authority_for_doc_class
 from ..payload import drop_empty
 from ..query import SORT, build_vocab, format_date, to_site_date
+from ..search_proof import inspect_list
 
 SEARCH_ACTION = "ASIPDI002PR01"
 DETAIL_ACTION = "ASIQTB002PR01"
@@ -126,6 +127,7 @@ async def search_documents(
     sort: str | None = None,
     page: int = 1,
     limit: int = 20,
+    verify_response: bool = False,
 ) -> dict[str, Any]:
     """목록 검색.
 
@@ -191,7 +193,10 @@ async def search_documents(
         param,
         referer=f"{NTS_ORIGIN}/qt/USEQTA001M.do?ntstDcmClCd={classes[0]}",
         ttl=TTL.SEARCH,
+        strict_envelope=verify_response,
     )
+
+    proof = inspect_list(payload, set(_to_dcm_cl_cd_ctl(classes)), page, limit) if verify_response else None
 
     top = (payload or {}).get("top") or []
     category_map = (top[0].get("categoryMap") if top else None) or {}
@@ -215,6 +220,7 @@ async def search_documents(
     items = [_row_to_summary(row["dcm"]) for row in body if row.get("dcm")]
 
     return {
+        **({"searchProof": proof} if proof is not None else {}),
         "total": total,
         "countsByDocClass": counts,
         "page": page,
